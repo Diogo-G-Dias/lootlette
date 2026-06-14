@@ -1,0 +1,733 @@
+package com.github.diogogdias.loulette;
+
+import com.google.inject.Provides;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Random;
+import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.awt.Color;
+import javax.inject.Inject;
+import lombok.extern.slf4j.Slf4j;
+import net.runelite.api.Client;
+import net.runelite.api.GameState;
+import net.runelite.api.MenuEntry;
+import net.runelite.api.NPC;
+import net.runelite.api.NPCComposition;
+import net.runelite.api.Player;
+import net.runelite.api.coords.WorldPoint;
+import net.runelite.api.events.GameStateChanged;
+import net.runelite.api.events.GameTick;
+import net.runelite.api.events.MenuOptionClicked;
+import net.runelite.api.events.NpcDespawned;
+import net.runelite.client.callback.ClientThread;
+import net.runelite.client.config.ConfigManager;
+import net.runelite.client.eventbus.Subscribe;
+import net.runelite.client.events.ConfigChanged;
+import net.runelite.client.events.NpcLootReceived;
+import net.runelite.client.events.ServerNpcLoot;
+import net.runelite.client.plugins.loottracker.LootReceived;
+import net.runelite.client.util.Text;
+import net.runelite.http.api.loottracker.LootRecordType;
+import net.runelite.client.game.ItemManager;
+import net.runelite.client.game.ItemStack;
+import net.runelite.client.plugins.Plugin;
+import net.runelite.client.plugins.PluginDescriptor;
+import net.runelite.client.ui.overlay.OverlayManager;
+import net.runelite.http.api.item.ItemPrice;
+
+@Slf4j
+@PluginDescriptor(
+	name = "Lootlette",
+	description = "Spins a slot-machine reel of a monster's drop table the moment its HP hits zero and lands on what you actually got",
+	tags = {"loot", "drop", "slot", "roll", "reel", "roulette", "fun", "wiki"}
+)
+public class LoulettePlugin extends Plugin
+{
+	static final String CONFIG_GROUP = "loulette";
+	static final int NOTHING_ID = -999;
+
+	private static final int COINS_ITEM_ID = 995;
+	private static final long ENGAGE_MS = 6000;
+	// How long a reel free-spins waiting for its loot before giving up. Harvests can take 10s+ to yield, so the
+	// spinner is also kept alive as long as the player keeps interacting with the creature (see onGameTick).
+	private static final long PRESPIN_TIMEOUT_MS = 15000;
+	private static final int MIN_POOL = 6;
+	private static final int MIN_LAND_LOOPS = 1;
+
+	@Inject
+	private Client client;
+
+	@Inject
+	private ClientThread clientThread;
+
+	@Inject
+	private ItemManager itemManager;
+
+	@Inject
+	private OverlayManager overlayManager;
+
+	@Inject
+	private LouletteOverlay overlay;
+
+	@Inject
+	private LouletteReelOverlay reelOverlay;
+
+	@Inject
+	private DropTableService dropTableService;
+
+	@Inject
+	private LouletteConfig config;
+
+	private final List<ActiveRoll> activeRolls = new CopyOnWriteArrayList<>();
+	private final Map<String, Set<Integer>> seenDrops = new ConcurrentHashMap<>();
+	private final Set<Integer> globalSeen = ConcurrentHashMap.newKeySet();
+	private final Map<String, ResolvedTable> tableCache = new ConcurrentHashMap<>();
+	private final Map<Integer, Long> engagedUntil = new ConcurrentHashMap<>();
+	private final Set<Integer> handledDeaths = ConcurrentHashMap.newKeySet();
+	// Dedupe: monster name (lower) -> game tick it was last rolled, so a kill isn't rolled twice when
+	// both NpcLootReceived (ground) and ServerNpcLoot (server) fire for it.
+	private final Map<String, Integer> handledLootTick = new ConcurrentHashMap<>();
+	private final Random random = new Random();
+
+	@Override
+	protected void startUp()
+	{
+		overlayManager.add(overlay);
+		overlayManager.add(reelOverlay);
+		log.debug("Lootlette started");
+	}
+
+	@Override
+	protected void shutDown()
+	{
+		overlayManager.remove(overlay);
+		overlayManager.remove(reelOverlay);
+		activeRolls.clear();
+		seenDrops.clear();
+		globalSeen.clear();
+		tableCache.clear();
+		engagedUntil.clear();
+		handledDeaths.clear();
+		handledLootTick.clear();
+		log.debug("Loulette stopped");
+	}
+
+	List<ActiveRoll> getActiveRolls()
+	{
+		return activeRolls;
+	}
+
+	@Subscribe
+	public void onConfigChanged(ConfigChanged event)
+	{
+		// Rarity colours are baked into each cached table's palette; rebuild them on the next kill.
+		if (CONFIG_GROUP.equals(event.getGroup()) && event.getKey() != null && event.getKey().startsWith("colour"))
+		{
+			tableCache.clear();
+		}
+	}
+
+	@Subscribe
+	public void onGameTick(GameTick tick)
+	{
+		final long now = System.currentTimeMillis();
+
+		// Track who we're fighting so we only roll for our own kills.
+		final Player me = client.getLocalPlayer();
+		if (me != null && me.getInteracting() instanceof NPC)
+		{
+			final NPC target = (NPC) me.getInteracting();
+			engagedUntil.put(target.getIndex(), now + ENGAGE_MS);
+			// Warm the table while fighting so it's ready by the time it dies (instant for the bundled
+			// snapshot; triggers the live fetch only when the fallback is enabled and the monster is unbundled).
+			if (target.getName() != null)
+			{
+				dropTableService.table(target.getName());
+			}
+		}
+
+		// Start the spin the instant one of our targets' HP hits zero.
+		for (NPC npc : client.getNpcs())
+		{
+			if (npc == null || npc.getName() == null || !isDying(npc))
+			{
+				continue;
+			}
+			final int index = npc.getIndex();
+			if (handledDeaths.contains(index) || !isEngaged(index, now))
+			{
+				continue;
+			}
+			handledDeaths.add(index);
+			startSpin(npc, now);
+		}
+
+		// Keep a still-spinning reel alive while the player keeps interacting with its creature (long harvests).
+		final int interactingIndex = me != null && me.getInteracting() instanceof NPC
+			? ((NPC) me.getInteracting()).getIndex()
+			: -1;
+		activeRolls.removeIf(roll ->
+			roll.done(now, config.resultHoldMs())
+				|| (!roll.isFinalised()
+					&& now > roll.getSpinStartMs() + PRESPIN_TIMEOUT_MS
+					&& roll.getNpcIndex() != interactingIndex));
+		engagedUntil.values().removeIf(expiry -> expiry < now);
+	}
+
+	@Subscribe
+	public void onNpcDespawned(NpcDespawned event)
+	{
+		handledDeaths.remove(event.getNpc().getIndex());
+	}
+
+	/** Clicking an NPC resolves its drop table ahead of time, so its pool and rarity colours are ready when it dies. */
+	@Subscribe
+	public void onMenuOptionClicked(MenuOptionClicked event)
+	{
+		final MenuEntry entry = event.getMenuEntry();
+		final NPC npc = entry.getNpc();
+		if (npc == null || npc.getName() == null || tableCache.containsKey(npc.getName().toLowerCase()))
+		{
+			return;
+		}
+		final String monster = npc.getName();
+		dropTableService.table(monster).thenAccept(entries ->
+			clientThread.invoke(() -> resolveTable(monster, entries)));
+	}
+
+	/** HP hit zero: begin free-spinning a reel over the dying NPC's tile. */
+	private void startSpin(NPC npc, long now)
+	{
+		final String monster = npc.getName();
+		if (!hasDropTable(monster))
+		{
+			log.debug("skip spin '{}' (no drop table)", monster);
+			return;
+		}
+		final ActiveRoll roll = new ActiveRoll(npc.getIndex(), npc.getWorldLocation(), now, monster);
+		ResolvedTable table = tableCache.get(monster.toLowerCase());
+		if (table == null)
+		{
+			// Instant for bundled monsters; triggers the live fetch (if enabled) for unbundled ones.
+			final List<DropEntry> entries = dropTableService.table(monster).getNow(null);
+			if (entries != null && !entries.isEmpty())
+			{
+				table = resolveTable(monster, entries);
+			}
+		}
+		roll.setPalette(table != null ? table.getPalette() : Collections.emptyMap());
+		activeRolls.add(roll);
+
+		// Always show a spinner during the death animation, even with no drop data yet.
+		final List<Integer> symbols = new ArrayList<>(spinnerPool(monster));
+		symbols.add(NOTHING_ID);
+		padTo(symbols, MIN_POOL);
+		Collections.shuffle(symbols, random);
+		roll.getReels().add(new SlotReel(symbols, now, config.spinSpeed()));
+
+		log.debug("startSpin '{}' (hp zero)", monster);
+	}
+
+	/**
+	 * Strict drop-table check: only spin when we have evidence the NPC actually drops loot — either we've
+	 * looted it before this session, or the bundled/live table is non-empty. NPCs with no drop table and
+	 * tables not yet fetched are skipped; the loot event will still roll real drops.
+	 */
+	private boolean hasDropTable(String monster)
+	{
+		final String key = monster.toLowerCase();
+		final Set<Integer> seen = seenDrops.get(key);
+		if (seen != null && !seen.isEmpty())
+		{
+			return true;
+		}
+		final List<DropEntry> entries = dropTableService.table(monster).getNow(null);
+		return entries != null && !entries.isEmpty();
+	}
+
+	private List<Integer> spinnerPool(String monster)
+	{
+		final ResolvedTable table = tableCache.get(monster.toLowerCase());
+		if (table != null && !table.getPool().isEmpty())
+		{
+			return table.getPool();
+		}
+		final Set<Integer> seen = seenDrops.get(monster.toLowerCase());
+		if (seen != null && !seen.isEmpty())
+		{
+			return new ArrayList<>(seen);
+		}
+		if (!globalSeen.isEmpty())
+		{
+			return new ArrayList<>(globalSeen);
+		}
+		return Collections.emptyList();
+	}
+
+	private boolean isDying(NPC npc)
+	{
+		return npc.isDead() || (npc.getHealthScale() > 0 && npc.getHealthRatio() == 0);
+	}
+
+	@Subscribe
+	public void onNpcLootReceived(NpcLootReceived event)
+	{
+		final NPC npc = event.getNpc();
+		if (npc == null || npc.getName() == null)
+		{
+			return;
+		}
+		final Collection<ItemStack> items = event.getItems();
+		if (items == null || items.isEmpty())
+		{
+			return;
+		}
+		if (!claimLoot(npc.getName()))
+		{
+			return;
+		}
+
+		rollFor(npc.getIndex(), npc.getWorldLocation(), npc.getName(), new ArrayList<>(items), false);
+	}
+
+	/**
+	 * Sailing creatures (and other server-tracked sources) are harvested, not killed, so they fire no death
+	 * animation and no NpcLootReceived — only ServerNpcLoot. Roll for those here. Combat kills also fire this,
+	 * but they're already owned by the death/NpcLootReceived path, so skip any creature with an active roll.
+	 */
+	@Subscribe
+	public void onServerNpcLoot(ServerNpcLoot event)
+	{
+		final NPCComposition comp = event.getComposition();
+		if (comp == null || comp.getName() == null)
+		{
+			return;
+		}
+		final String name = Text.removeTags(comp.getName());
+		final Collection<ItemStack> items = event.getItems();
+		log.debug("onServerNpcLoot '{}' id={} items={}", name, comp.getId(), items == null ? -1 : items.size());
+		if (name.isEmpty() || "null".equals(name) || items == null || items.isEmpty())
+		{
+			return;
+		}
+		// Dedupe against NpcLootReceived, which also fires for combat kills on the same tick.
+		if (!claimLoot(name))
+		{
+			return;
+		}
+
+		// Anchor over the creature being harvested (the one we're interacting with, else nearest of that id).
+		final Player me = client.getLocalPlayer();
+		NPC npc = me != null && me.getInteracting() instanceof NPC ? (NPC) me.getInteracting() : null;
+		if (npc == null || npc.getId() != comp.getId())
+		{
+			npc = findSceneNpc(comp.getId());
+		}
+		final WorldPoint loc = npc != null && npc.getWorldLocation() != null
+			? npc.getWorldLocation()
+			: (me != null ? me.getWorldLocation() : null);
+		log.debug("onServerNpcLoot rolling '{}' loc={} npcIndex={}", name, loc, npc != null ? npc.getIndex() : -1);
+		rollFor(npc != null ? npc.getIndex() : -1, loc, name, new ArrayList<>(items), false);
+	}
+
+	/** Claims a loot event for a creature this tick; returns false if it was already claimed (duplicate event). */
+	private boolean claimLoot(String monster)
+	{
+		final int tick = client.getTickCount();
+		final Integer prev = handledLootTick.put(monster.toLowerCase(), tick);
+		return prev == null || prev != tick;
+	}
+
+	/**
+	 * An unfinalised roll for this creature means a combat kill is mid-flight (death pre-spin awaiting its loot),
+	 * so ServerNpcLoot should defer to it. A finalised, still-lingering roll (e.g. the previous harvest yield)
+	 * must NOT match, or rapid harvests get wrongly suppressed.
+	 */
+	private ActiveRoll findUnfinalisedRollByName(String monster)
+	{
+		for (ActiveRoll roll : activeRolls)
+		{
+			if (!roll.isFinalised() && monster.equalsIgnoreCase(roll.getMonster()))
+			{
+				return roll;
+			}
+		}
+		return null;
+	}
+
+	/** Finds the nearest scene NPC matching a composition id, to anchor a harvest reel over the creature. */
+	private NPC findSceneNpc(int npcId)
+	{
+		final Player me = client.getLocalPlayer();
+		final WorldPoint mine = me != null ? me.getWorldLocation() : null;
+		NPC nearest = null;
+		int best = Integer.MAX_VALUE;
+		for (NPC npc : client.getNpcs())
+		{
+			if (npc == null || npc.getId() != npcId)
+			{
+				continue;
+			}
+			final WorldPoint loc = npc.getWorldLocation();
+			if (loc == null)
+			{
+				continue;
+			}
+			if (mine == null)
+			{
+				return npc;
+			}
+			final int dist = mine.distanceTo(loc);
+			if (dist < best)
+			{
+				best = dist;
+				nearest = npc;
+			}
+		}
+		return nearest;
+	}
+
+	/** Raids reward chests don't fire NpcLootReceived and have no dying NPC, so roll straight off the chest loot. */
+	@Subscribe
+	public void onLootReceived(LootReceived event)
+	{
+		if (event.getType() != LootRecordType.EVENT)
+		{
+			return;
+		}
+		final String chest = raidChestPage(event.getName());
+		if (chest == null)
+		{
+			return;
+		}
+		final Collection<ItemStack> items = event.getItems();
+		if (items == null || items.isEmpty())
+		{
+			return;
+		}
+		final Player me = client.getLocalPlayer();
+		final WorldPoint loc = me != null ? me.getWorldLocation() : null;
+		rollFor(-1, loc, chest, new ArrayList<>(items), true);
+	}
+
+	/** Maps a RuneLite raids loot-event name to the OSRS Wiki reward-chest page that holds its drop table. */
+	private static String raidChestPage(String name)
+	{
+		if (name == null)
+		{
+			return null;
+		}
+		if (name.startsWith("Chambers of Xeric"))
+		{
+			return "Ancient chest";
+		}
+		if (name.startsWith("Theatre of Blood"))
+		{
+			return "Monumental chest";
+		}
+		if (name.startsWith("Tombs of Amascut"))
+		{
+			return "Chest (Tombs of Amascut)";
+		}
+		return null;
+	}
+
+	/** Records the drop and spins a roll for a loot source (NPC kill or raids chest), reusing any in-flight roll. */
+	private void rollFor(int index, WorldPoint location, String source, List<ItemStack> items, boolean forceHorizontal)
+	{
+		final Set<Integer> seen = seenDrops.computeIfAbsent(source.toLowerCase(), k -> ConcurrentHashMap.newKeySet());
+		for (ItemStack s : items)
+		{
+			seen.add(s.getId());
+			globalSeen.add(s.getId());
+		}
+
+		ActiveRoll roll = index >= 0 ? findRoll(index) : null;
+		if (roll == null)
+		{
+			// Land the creature's spinning death/harvest pre-spin if one exists (it may be anchored under a
+			// different index, e.g. a harvest creature detected as "dying"), so it settles on the real loot.
+			roll = findUnfinalisedRollByName(source);
+		}
+		if (roll == null)
+		{
+			roll = new ActiveRoll(index, location, System.currentTimeMillis(), source);
+			roll.setForceHorizontal(forceHorizontal);
+			activeRolls.add(roll);
+		}
+		final ActiveRoll target = roll;
+
+		final CompletableFuture<List<DropEntry>> future = dropTableService.table(source);
+		final List<DropEntry> cached = future.getNow(null);
+		if (cached != null)
+		{
+			finaliseRoll(target, items, cached);
+		}
+		else
+		{
+			future.thenAccept(entries ->
+				clientThread.invoke(() -> finaliseRoll(target, items, entries)));
+		}
+	}
+
+	private void finaliseRoll(ActiveRoll roll, List<ItemStack> items, List<DropEntry> entries)
+	{
+		final ResolvedTable table = !entries.isEmpty()
+			? resolveTable(roll.getMonster(), entries)
+			: tableCache.get(roll.getMonster().toLowerCase());
+		final boolean haveWiki = table != null;
+
+		final Set<Integer> alwaysIds = haveWiki ? table.getAlwaysIds() : Collections.emptySet();
+		final Set<Integer> pool = new LinkedHashSet<>();
+		if (haveWiki)
+		{
+			pool.addAll(table.getPool());
+			roll.setPalette(table.getPalette());
+		}
+		else
+		{
+			pool.addAll(seenDrops.getOrDefault(roll.getMonster().toLowerCase(), Collections.emptySet()));
+		}
+
+		final List<ItemStack> hits = new ArrayList<>();
+		for (ItemStack s : items)
+		{
+			if (alwaysIds.contains(s.getId()))
+			{
+				continue;
+			}
+			if (itemManager.getItemPrice(s.getId()) < config.minItemValue())
+			{
+				continue;
+			}
+			hits.add(s);
+			pool.add(s.getId());
+		}
+		hits.sort((a, b) -> Long.compare(value(b), value(a)));
+
+		final int mainRolls = haveWiki ? table.getMainRolls() : hits.size();
+		int rolls = Math.max(mainRolls, hits.size());
+		rolls = Math.min(rolls, config.maxReels());
+
+		if (rolls <= 0)
+		{
+			activeRolls.remove(roll);
+			return;
+		}
+
+		pool.add(NOTHING_ID);
+		final List<Integer> basePool = new ArrayList<>(pool);
+		final long now = System.currentTimeMillis();
+		final int settle = config.settleMs();
+		final List<SlotReel> reels = new ArrayList<>();
+
+		final int hitCount = Math.min(hits.size(), rolls);
+		for (int i = 0; i < hitCount; i++)
+		{
+			final ItemStack s = hits.get(i);
+			reels.add(buildReel(basePool, roll.getSpinStartMs(), now, s.getId(), s.getQuantity(), settle));
+		}
+		for (int i = hitCount; i < rolls; i++)
+		{
+			reels.add(buildReel(basePool, roll.getSpinStartMs(), now, NOTHING_ID, 1, settle));
+		}
+
+		roll.setReels(reels);
+		log.debug("finalise '{}' rolls={} hits={} (loot spawned)", roll.getMonster(), rolls, hits.size());
+	}
+
+	private SlotReel buildReel(List<Integer> basePool, long spinStartMs, long now, int targetId, int quantity, int settle)
+	{
+		final List<Integer> symbols = new ArrayList<>(basePool);
+		if (!symbols.contains(targetId))
+		{
+			symbols.add(targetId);
+		}
+		padTo(symbols, MIN_POOL);
+		Collections.shuffle(symbols, random);
+
+		final SlotReel reel = new SlotReel(symbols, spinStartMs, config.spinSpeed());
+		reel.land(now, targetId, quantity, settle, MIN_LAND_LOOPS);
+		return reel;
+	}
+
+	/** Resolve a monster's wiki entries to item ids, rarity colours, guaranteed-drop ids and roll count; cached per monster. */
+	private ResolvedTable resolveTable(String monster, List<DropEntry> entries)
+	{
+		final ResolvedTable existing = tableCache.get(monster.toLowerCase());
+		if (existing != null || entries.isEmpty())
+		{
+			return existing;
+		}
+
+		final Set<String> nonAlwaysNames = new LinkedHashSet<>();
+		final Set<String> anyAlwaysNames = new HashSet<>();
+		final Map<Integer, Integer> rollCounts = new HashMap<>();
+		final Map<String, Double> nameChance = new HashMap<>();
+		for (DropEntry e : entries)
+		{
+			if (e.isAlways())
+			{
+				anyAlwaysNames.add(e.getName());
+			}
+			else
+			{
+				nonAlwaysNames.add(e.getName());
+				rollCounts.merge(e.getRolls(), 1, Integer::sum);
+				nameChance.merge(e.getName(), e.getChance(), LoulettePlugin::rarer);
+			}
+		}
+		anyAlwaysNames.removeAll(nonAlwaysNames);
+
+		final Set<Integer> alwaysIds = new HashSet<>();
+		for (String name : anyAlwaysNames)
+		{
+			final int id = resolveItemId(name);
+			if (id > 0)
+			{
+				alwaysIds.add(id);
+			}
+		}
+
+		final List<Integer> pool = new ArrayList<>();
+		final Map<Integer, Double> idChance = new HashMap<>();
+		for (String name : nonAlwaysNames)
+		{
+			final int id = resolveItemId(name);
+			if (id > 0)
+			{
+				if (!idChance.containsKey(id))
+				{
+					pool.add(id);
+				}
+				idChance.merge(id, nameChance.getOrDefault(name, -1.0), LoulettePlugin::rarer);
+			}
+		}
+		final Map<Integer, Color> palette = new HashMap<>();
+		for (Map.Entry<Integer, Double> e : idChance.entrySet())
+		{
+			palette.put(e.getKey(), Rarity.colour(e.getValue(), config));
+		}
+
+		final ResolvedTable table = new ResolvedTable(pool, palette, alwaysIds, mode(rollCounts));
+		tableCache.put(monster.toLowerCase(), table);
+		return table;
+	}
+
+	@Subscribe
+	public void onGameStateChanged(GameStateChanged event)
+	{
+		if (event.getGameState() == GameState.LOGIN_SCREEN || event.getGameState() == GameState.HOPPING)
+		{
+			activeRolls.clear();
+			engagedUntil.clear();
+			handledDeaths.clear();
+		}
+	}
+
+	private boolean isEngaged(int index, long now)
+	{
+		final Long until = engagedUntil.get(index);
+		return until != null && until >= now;
+	}
+
+	private ActiveRoll findRoll(int npcIndex)
+	{
+		for (ActiveRoll roll : activeRolls)
+		{
+			if (roll.getNpcIndex() == npcIndex && !roll.isFinalised())
+			{
+				return roll;
+			}
+		}
+		return null;
+	}
+
+	/** Combine two drop chances, preferring a known fraction over varies/unknown, then the rarer (smaller). */
+	private static double rarer(double a, double b)
+	{
+		if (!(a > 0)) // unknown or varies (NaN)
+		{
+			return b;
+		}
+		if (!(b > 0))
+		{
+			return a;
+		}
+		return Math.min(a, b);
+	}
+
+	private static int mode(Map<Integer, Integer> counts)
+	{
+		int best = 1;
+		int bestCount = 0;
+		for (Map.Entry<Integer, Integer> e : counts.entrySet())
+		{
+			if (e.getValue() > bestCount || (e.getValue() == bestCount && e.getKey() < best))
+			{
+				best = e.getKey();
+				bestCount = e.getValue();
+			}
+		}
+		return Math.max(1, best);
+	}
+
+	private void padTo(List<Integer> symbols, int min)
+	{
+		if (symbols.isEmpty())
+		{
+			return;
+		}
+		int i = 0;
+		while (symbols.size() < min)
+		{
+			symbols.add(symbols.get(i % symbols.size()));
+			i++;
+		}
+	}
+
+	private long value(ItemStack stack)
+	{
+		return (long) itemManager.getItemPrice(stack.getId()) * Math.max(1, stack.getQuantity());
+	}
+
+	private int resolveItemId(String name)
+	{
+		if (name == null || name.isEmpty())
+		{
+			return -1;
+		}
+		if (name.equalsIgnoreCase("Coins"))
+		{
+			return COINS_ITEM_ID;
+		}
+		final List<ItemPrice> results = itemManager.search(name);
+		if (results.isEmpty())
+		{
+			return -1;
+		}
+		for (ItemPrice p : results)
+		{
+			if (name.equalsIgnoreCase(p.getName()))
+			{
+				return p.getId();
+			}
+		}
+		return results.get(0).getId();
+	}
+
+	@Provides
+	LouletteConfig provideConfig(ConfigManager configManager)
+	{
+		return configManager.getConfig(LouletteConfig.class);
+	}
+}
