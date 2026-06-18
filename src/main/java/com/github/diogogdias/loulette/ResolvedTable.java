@@ -14,12 +14,15 @@ class ResolvedTable
 	private final Map<Integer, Color> palette;
 	private final Set<Integer> alwaysIds;
 	private final int mainRolls;
+	/** True when every drop is guaranteed ("Always"): nothing is actually rolled, so no reel should spin. */
+	private final boolean alwaysOnly;
 
-	ResolvedTable(List<Integer> pool, Map<Integer, Color> palette, Set<Integer> alwaysIds, int mainRolls)
+	ResolvedTable(List<Integer> pool, Map<Integer, Color> palette, Set<Integer> alwaysIds, int mainRolls, boolean alwaysOnly)
 	{
 		this.pool = pool;
 		this.palette = palette;
 		this.alwaysIds = alwaysIds;
 		this.mainRolls = mainRolls;
+		this.alwaysOnly = alwaysOnly;
 	}
 }

@@ -213,7 +213,6 @@ public class LoulettePlugin extends Plugin
 			log.debug("skip spin '{}' (no drop table)", monster);
 			return;
 		}
-		final ActiveRoll roll = new ActiveRoll(npc.getIndex(), npc.getWorldLocation(), now, monster);
 		ResolvedTable table = tableCache.get(monster.toLowerCase());
 		if (table == null)
 		{
@@ -224,6 +223,13 @@ public class LoulettePlugin extends Plugin
 				table = resolveTable(monster, entries);
 			}
 		}
+		// Nothing is rolled for a guaranteed-only drop table (e.g. ToB Maiden), so don't spin a reel for it.
+		if (table != null && table.isAlwaysOnly())
+		{
+			log.debug("skip spin '{}' (only guaranteed drops)", monster);
+			return;
+		}
+		final ActiveRoll roll = new ActiveRoll(npc.getIndex(), npc.getWorldLocation(), now, monster);
 		roll.setPalette(table != null ? table.getPalette() : Collections.emptyMap());
 		activeRolls.add(roll);
 
@@ -618,7 +624,9 @@ public class LoulettePlugin extends Plugin
 			palette.put(e.getKey(), Rarity.colour(e.getValue(), config));
 		}
 
-		final ResolvedTable table = new ResolvedTable(pool, palette, alwaysIds, mode(rollCounts));
+		final boolean alwaysOnly = nonAlwaysNames.isEmpty();
+		final int mainRolls = alwaysOnly ? 0 : mode(rollCounts);
+		final ResolvedTable table = new ResolvedTable(pool, palette, alwaysIds, mainRolls, alwaysOnly);
 		tableCache.put(monster.toLowerCase(), table);
 		return table;
 	}
