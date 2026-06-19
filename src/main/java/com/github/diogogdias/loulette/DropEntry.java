@@ -10,12 +10,15 @@ class DropEntry
 	private final boolean always;
 	private final int rolls;
 	private final double chance; // drop probability, e.g. 1/128 = 0.0078; <= 0 means unknown
+	/** True when this row comes from the shared rare/gem/mega drop table rather than the monster's own drops. */
+	private final boolean rdt;
 
-	DropEntry(String name, boolean always, int rolls, double chance)
+	DropEntry(String name, boolean always, int rolls, double chance, boolean rdt)
 	{
 		this.name = name;
 		this.always = always;
 		this.rolls = rolls;
 		this.chance = chance;
+		this.rdt = rdt;
 	}
 }

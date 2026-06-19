@@ -25,6 +25,11 @@ class ActiveRoll
 	@Setter
 	private boolean forceHorizontal;
 
+	// A raids-chest reel that starts free-spinning when you enter the reward room, before the chest is opened.
+	// It lingers on a longer (2x hold) timeout instead of the normal pre-spin timeout.
+	@Setter
+	private boolean anticipation;
+
 	// item id -> CS:GO rarity-grade colour for this monster's table
 	@Setter
 	private Map<Integer, Color> palette = Collections.emptyMap();

@@ -5,13 +5,19 @@
 // Output: src/main/resources/com/github/diogogdias/loulette/drops.json.gz
 //
 // Schema (keyed by lower-cased monster/page name):
-//   { "lastUpdated": "YYYY-MM-DD", "monsters": { "<page>": [ [name, rarity, rolls], ... ] } }
-// rolls is omitted (defaults to 1) when 1. "Nothing"/empty rows are dropped.
+//   { "lastUpdated": "YYYY-MM-DD",
+//     "monsters": { "<page>": [ [name, rarity, rolls, rdt], ... ] },
+//     "items": { "<lower item name>": <item id> } }
+// rolls is omitted (defaults to 1) when 1; rdt (a trailing 1 marking a rare/gem/mega drop-table
+// row) is omitted when absent. "Nothing"/empty rows are dropped. The items map carries an in-game id
+// for every dropped item (incl. untradeables that ItemManager.search can't resolve).
 
 import { writeFileSync, mkdirSync } from "node:fs";
 import { gzipSync } from "node:zlib";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { fetchCanonical, flagRareDropTable } from "./rdt-detect.mjs";
+import { fetchItemIdMap, itemIdsFor } from "./item-ids.mjs";
 
 const API = "https://oldschool.runescape.wiki/api.php";
 const PAGE = 5000;
@@ -63,9 +69,16 @@ for (let offset = 0; ; offset += PAGE) {
   if (rows.length < PAGE) break;
 }
 
+const base = await fetchCanonical();
+const flagged = flagRareDropTable(monsters, base);
+process.stderr.write(`flagged ${flagged} rare/gem/mega drop-table rows (${Object.keys(base).length} canonical items)\n`);
+
+const items = itemIdsFor(monsters, await fetchItemIdMap());
+process.stderr.write(`item ids: ${Object.keys(items).length} mapped\n`);
+
 const now = new Date();
 const lastUpdated = now.toISOString().slice(0, 10);
-const payload = { lastUpdated, monsters };
+const payload = { lastUpdated, monsters, items };
 const raw = Buffer.from(JSON.stringify(payload));
 const gz = gzipSync(raw, { level: 9 });
 

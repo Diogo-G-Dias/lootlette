@@ -175,6 +175,18 @@ public interface LouletteConfig extends Config
 	}
 
 	@ConfigItem(
+		keyName = "hideRareDropTable",
+		name = "Hide rare drop table",
+		description = "Leave the shared rare/gem/mega drop table (uncut gems, half keys, deep rune/dragon drops) out of "
+			+ "the reel so the monster's own drops and uniques stand out. Items you actually receive still land.",
+		position = 7
+	)
+	default boolean hideRareDropTable()
+	{
+		return true;
+	}
+
+	@ConfigItem(
 		keyName = "wikiDropTables",
 		name = "Live wiki fallback",
 		description = "<html>Drop tables ship bundled with the plugin, so full reels (every possible drop, roll counts, "
@@ -183,7 +195,7 @@ public interface LouletteConfig extends Config
 			+ "snapshot (e.g. brand-new content).<br>"
 			+ "<i>Each monster is fetched once and cached.</i></html>",
 		warning = "This feature submits your IP address to a 3rd-party server not controlled or verified by RuneLite developers",
-		position = 7
+		position = 8
 	)
 	default boolean wikiDropTables()
 	{

@@ -49,6 +49,9 @@ class DropTableService
 	/** Bundled snapshot: lower-cased page name -> drop lines. Immutable after load. */
 	private final Map<String, List<DropEntry>> bundled;
 
+	/** Bundled item name (lower-cased) -> in-game id, covering untradeables ItemManager.search can't. */
+	private final Map<String, Integer> itemIds;
+
 	private final Map<String, CompletableFuture<List<DropEntry>>> cache = new ConcurrentHashMap<>();
 
 	@Inject
@@ -57,7 +60,20 @@ class DropTableService
 		this.okHttpClient = okHttpClient;
 		this.gson = gson;
 		this.config = config;
-		this.bundled = loadSnapshot(gson);
+		final JsonObject root = loadRoot(gson);
+		this.bundled = parseMonsters(root);
+		this.itemIds = parseItemIds(root);
+	}
+
+	/** Bundled in-game id for an item name, or -1 if it isn't in the snapshot. */
+	int itemId(String name)
+	{
+		if (name == null)
+		{
+			return -1;
+		}
+		final Integer id = itemIds.get(name.toLowerCase());
+		return id != null ? id : -1;
 	}
 
 	CompletableFuture<List<DropEntry>> table(String monster)
@@ -75,38 +91,66 @@ class DropTableService
 		return EMPTY;
 	}
 
-	/** Reads the gzipped snapshot bundled in resources into an immutable name -> drop-lines map. */
-	private static Map<String, List<DropEntry>> loadSnapshot(Gson gson)
+	/** Reads and parses the gzipped snapshot bundled in resources; null if it's missing or unreadable. */
+	private static JsonObject loadRoot(Gson gson)
 	{
 		try (InputStream raw = DropTableService.class.getResourceAsStream(SNAPSHOT))
 		{
 			if (raw == null)
 			{
 				log.warn("Drop-table snapshot '{}' missing; relying on the live wiki fallback only", SNAPSHOT);
-				return Collections.emptyMap();
+				return null;
 			}
 			try (InputStreamReader reader = new InputStreamReader(new GZIPInputStream(raw), StandardCharsets.UTF_8))
 			{
-				final JsonObject root = gson.fromJson(reader, JsonObject.class);
-				final JsonObject monsters = root.getAsJsonObject("monsters");
-				final Map<String, List<DropEntry>> out = new HashMap<>(monsters.size() * 2);
-				for (Map.Entry<String, JsonElement> e : monsters.entrySet())
-				{
-					out.put(e.getKey(), Collections.unmodifiableList(parseLines(e.getValue().getAsJsonArray())));
-				}
-				log.debug("Loaded drop-table snapshot: {} monsters (updated {})",
-					out.size(), root.has("lastUpdated") ? root.get("lastUpdated").getAsString() : "?");
-				return Collections.unmodifiableMap(out);
+				return gson.fromJson(reader, JsonObject.class);
 			}
 		}
 		catch (Exception e)
 		{
 			log.warn("Failed to load drop-table snapshot '{}': {}", SNAPSHOT, e.getMessage());
-			return Collections.emptyMap();
+			return null;
 		}
 	}
 
-	/** Each line is {@code [name, rarity]} or {@code [name, rarity, rolls]}; rolls defaults to 1. */
+	/** Bundled snapshot -> immutable lower-cased page name -> drop-lines map. */
+	private static Map<String, List<DropEntry>> parseMonsters(JsonObject root)
+	{
+		if (root == null || !root.has("monsters"))
+		{
+			return Collections.emptyMap();
+		}
+		final JsonObject monsters = root.getAsJsonObject("monsters");
+		final Map<String, List<DropEntry>> out = new HashMap<>(monsters.size() * 2);
+		for (Map.Entry<String, JsonElement> e : monsters.entrySet())
+		{
+			out.put(e.getKey(), Collections.unmodifiableList(parseLines(e.getValue().getAsJsonArray())));
+		}
+		log.debug("Loaded drop-table snapshot: {} monsters (updated {})",
+			out.size(), root.has("lastUpdated") ? root.get("lastUpdated").getAsString() : "?");
+		return Collections.unmodifiableMap(out);
+	}
+
+	/** Bundled snapshot -> immutable lower-cased item name -> in-game id map. */
+	private static Map<String, Integer> parseItemIds(JsonObject root)
+	{
+		if (root == null || !root.has("items") || !root.get("items").isJsonObject())
+		{
+			return Collections.emptyMap();
+		}
+		final JsonObject items = root.getAsJsonObject("items");
+		final Map<String, Integer> out = new HashMap<>(items.size() * 2);
+		for (Map.Entry<String, JsonElement> e : items.entrySet())
+		{
+			out.put(e.getKey(), e.getValue().getAsInt());
+		}
+		return Collections.unmodifiableMap(out);
+	}
+
+	/**
+	 * Each line is {@code [name, rarity]}, {@code [name, rarity, rolls]} or {@code [name, rarity, rolls, rdt]};
+	 * rolls defaults to 1, and a trailing {@code 1} marks a rare/gem/mega drop-table row.
+	 */
 	private static List<DropEntry> parseLines(JsonArray lines)
 	{
 		final List<DropEntry> entries = new ArrayList<>(lines.size());
@@ -116,7 +160,8 @@ class DropTableService
 			final String name = line.get(0).getAsString();
 			final String rarity = line.size() > 1 && !line.get(1).isJsonNull() ? line.get(1).getAsString() : "";
 			final int rolls = line.size() > 2 ? Math.max(1, line.get(2).getAsInt()) : 1;
-			entries.add(new DropEntry(name, "Always".equalsIgnoreCase(rarity), rolls, parseChance(rarity)));
+			final boolean rdt = line.size() > 3 && line.get(3).getAsInt() == 1;
+			entries.add(new DropEntry(name, "Always".equalsIgnoreCase(rarity), rolls, parseChance(rarity), rdt));
 		}
 		return entries;
 	}
@@ -213,7 +258,9 @@ class DropTableService
 					// keep defaults
 				}
 			}
-			entries.add(new DropEntry(name, always, rolls, chance));
+			// The live fallback fetches a single monster, so there's no cross-row context to detect the
+			// shared rare/gem/mega drop table; those rows are left in for unbundled monsters.
+			entries.add(new DropEntry(name, always, rolls, chance, false));
 		}
 
 		log.debug("Drop table for '{}': {} lines", monster, entries.size());

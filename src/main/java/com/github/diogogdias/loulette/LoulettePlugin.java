@@ -2,6 +2,7 @@ package com.github.diogogdias.loulette;
 
 import com.google.inject.Provides;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
@@ -18,12 +19,15 @@ import java.awt.Color;
 import javax.inject.Inject;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.Client;
+import net.runelite.api.GameObject;
 import net.runelite.api.GameState;
 import net.runelite.api.MenuEntry;
 import net.runelite.api.NPC;
 import net.runelite.api.NPCComposition;
+import net.runelite.api.ObjectComposition;
 import net.runelite.api.Player;
 import net.runelite.api.coords.WorldPoint;
+import net.runelite.api.events.GameObjectSpawned;
 import net.runelite.api.events.GameStateChanged;
 import net.runelite.api.events.GameTick;
 import net.runelite.api.events.MenuOptionClicked;
@@ -54,6 +58,66 @@ public class LoulettePlugin extends Plugin
 {
 	static final String CONFIG_GROUP = "loulette";
 	static final int NOTHING_ID = -999;
+
+	// Bosses whose HP bar empties at every phase transition, not just on death. The HP-zero pre-spin would
+	// otherwise free-spin a reel mid-fight; these still roll on the actual kill via the loot event.
+	private static final Set<String> MULTI_PHASE_BOSSES = new HashSet<>(Arrays.asList(
+		"the nightmare", "phosani's nightmare", "verzik vitur", "kalphite queen"
+	));
+
+	// Raid room bosses whose rewards come from the raid chest, not the boss. Rolling per-boss just spins their
+	// lore-book/journal "Always" unlocks (or nothing); the chest handles the real loot. Suppressed on both the
+	// death and loot paths.
+	private static final Set<String> RAID_CHEST_BOSSES = new HashSet<>(Arrays.asList(
+		// Theatre of Blood
+		"the maiden of sugadinti", "maiden of sugadinti", "pestilent bloat", "nylocas vasilias",
+		"sotetseg", "xarpus", "verzik vitur"
+	));
+
+	/**
+	 * A raids reward chest: the reward-room chest object ids (to start the anticipation reel on entry and
+	 * anchor it), the loot-event name prefix, the wiki drop-table page, and the unique ("purple") item set.
+	 * A purple chest rolls only the uniques; a white chest rolls only the supplies.
+	 */
+	private static final class RaidChest
+	{
+		final Set<Integer> objectIds;
+		final Set<String> objectNames; // lower-cased reward-room chest object names (multiloc-id safe)
+		final String eventPrefix;
+		final String page;
+		final Set<String> uniqueNames; // lower-cased
+
+		RaidChest(Set<Integer> objectIds, Set<String> objectNames, String eventPrefix, String page, String... uniques)
+		{
+			this.objectIds = objectIds;
+			this.objectNames = objectNames;
+			this.eventPrefix = eventPrefix;
+			this.page = page;
+			this.uniqueNames = new HashSet<>(Arrays.asList(uniques));
+		}
+	}
+
+	private static final List<RaidChest> RAID_CHESTS = Arrays.asList(
+		// Chambers of Xeric — Ancient chest (RAIDS_REWARD_CHEST)
+		new RaidChest(new HashSet<>(Arrays.asList(30028)), new HashSet<>(Arrays.asList("ancient chest")),
+			"Chambers of Xeric", "Ancient chest",
+			"dexterous prayer scroll", "arcane prayer scroll", "twisted buckler", "dragon hunter crossbow",
+			"dinh's bulwark", "ancestral hat", "ancestral robe top", "ancestral robe bottom", "dragon claws",
+			"elder maul", "kodai insignia", "twisted bow", "olmlet", "twisted ancestral colour kit",
+			"metamorphic dust"),
+		// Theatre of Blood — Monumental chest (TOBANCHEST)
+		new RaidChest(new HashSet<>(Arrays.asList(2790)), new HashSet<>(Arrays.asList("monumental chest")),
+			"Theatre of Blood", "Monumental chest",
+			"avernic defender hilt", "ghrazi rapier", "sanguinesti staff (uncharged)", "justiciar faceguard",
+			"justiciar chestguard", "justiciar legguards", "scythe of vitur (uncharged)", "holy ornament kit",
+			"sanguine ornament kit", "sanguine dust", "lil' zik"),
+		// Tombs of Amascut — Chest (TOA_VAULT_CHEST_LOC0). Name is generic ("Chest"), so match by id only.
+		new RaidChest(new HashSet<>(Arrays.asList(29994)), Collections.emptySet(),
+			"Tombs of Amascut", "Chest (Tombs of Amascut)",
+			"osmumten's fang", "tumeken's shadow (uncharged)", "elidinis' ward", "lightbearer", "masori mask",
+			"masori body", "masori chaps", "eye of the corruptor", "jewel of the sun", "breach of the scarab",
+			"jewel of amascut", "tumeken's guardian")
+	);
 
 	private static final int COINS_ITEM_ID = 995;
 	private static final long ENGAGE_MS = 6000;
@@ -91,6 +155,8 @@ public class LoulettePlugin extends Plugin
 	private final Map<String, Set<Integer>> seenDrops = new ConcurrentHashMap<>();
 	private final Set<Integer> globalSeen = ConcurrentHashMap.newKeySet();
 	private final Map<String, ResolvedTable> tableCache = new ConcurrentHashMap<>();
+	// Raids chest page -> resolved unique ("purple") item ids.
+	private final Map<String, Set<Integer>> raidUniqueIds = new ConcurrentHashMap<>();
 	private final Map<Integer, Long> engagedUntil = new ConcurrentHashMap<>();
 	private final Set<Integer> handledDeaths = ConcurrentHashMap.newKeySet();
 	// Dedupe: monster name (lower) -> game tick it was last rolled, so a kill isn't rolled twice when
@@ -129,8 +195,10 @@ public class LoulettePlugin extends Plugin
 	@Subscribe
 	public void onConfigChanged(ConfigChanged event)
 	{
-		// Rarity colours are baked into each cached table's palette; rebuild them on the next kill.
-		if (CONFIG_GROUP.equals(event.getGroup()) && event.getKey() != null && event.getKey().startsWith("colour"))
+		// Rarity colours are baked into each cached table's palette, and the rare-drop-table filter is baked
+		// into its pool; rebuild cached tables on the next kill when either changes.
+		if (CONFIG_GROUP.equals(event.getGroup()) && event.getKey() != null
+			&& (event.getKey().startsWith("colour") || event.getKey().equals("hideRareDropTable")))
 		{
 			tableCache.clear();
 		}
@@ -176,10 +244,22 @@ public class LoulettePlugin extends Plugin
 			? ((NPC) me.getInteracting()).getIndex()
 			: -1;
 		activeRolls.removeIf(roll ->
-			roll.done(now, config.resultHoldMs())
-				|| (!roll.isFinalised()
-					&& now > roll.getSpinStartMs() + PRESPIN_TIMEOUT_MS
-					&& roll.getNpcIndex() != interactingIndex));
+		{
+			if (roll.done(now, config.resultHoldMs()))
+			{
+				return true;
+			}
+			if (roll.isFinalised())
+			{
+				return false;
+			}
+			// A chest anticipation reel lingers until the chest is opened or 2x the result-hold time passes.
+			if (roll.isAnticipation())
+			{
+				return now > roll.getSpinStartMs() + 2L * config.resultHoldMs();
+			}
+			return now > roll.getSpinStartMs() + PRESPIN_TIMEOUT_MS && roll.getNpcIndex() != interactingIndex;
+		});
 		engagedUntil.values().removeIf(expiry -> expiry < now);
 	}
 
@@ -208,6 +288,18 @@ public class LoulettePlugin extends Plugin
 	private void startSpin(NPC npc, long now)
 	{
 		final String monster = npc.getName();
+		if (isRaidChestBoss(monster))
+		{
+			log.debug("skip spin '{}' (raid boss; loot comes from the chest)", monster);
+			return;
+		}
+		// Multi-phase bosses empty their HP bar between phases; don't pre-spin on that. The real kill still
+		// rolls via the loot event.
+		if (MULTI_PHASE_BOSSES.contains(monster.toLowerCase()))
+		{
+			log.debug("skip spin '{}' (multi-phase boss; rolling on loot only)", monster);
+			return;
+		}
 		if (!hasDropTable(monster))
 		{
 			log.debug("skip spin '{}' (no drop table)", monster);
@@ -288,7 +380,7 @@ public class LoulettePlugin extends Plugin
 	public void onNpcLootReceived(NpcLootReceived event)
 	{
 		final NPC npc = event.getNpc();
-		if (npc == null || npc.getName() == null)
+		if (npc == null || npc.getName() == null || isRaidChestBoss(npc.getName()))
 		{
 			return;
 		}
@@ -321,7 +413,7 @@ public class LoulettePlugin extends Plugin
 		final String name = Text.removeTags(comp.getName());
 		final Collection<ItemStack> items = event.getItems();
 		log.debug("onServerNpcLoot '{}' id={} items={}", name, comp.getId(), items == null ? -1 : items.size());
-		if (name.isEmpty() || "null".equals(name) || items == null || items.isEmpty())
+		if (name.isEmpty() || "null".equals(name) || items == null || items.isEmpty() || isRaidChestBoss(name))
 		{
 			return;
 		}
@@ -402,7 +494,31 @@ public class LoulettePlugin extends Plugin
 		return nearest;
 	}
 
-	/** Raids reward chests don't fire NpcLootReceived and have no dying NPC, so roll straight off the chest loot. */
+	/** Entering a raid's reward room: spawn an anticipation reel on the chest, free-spinning its unique table. */
+	@Subscribe
+	public void onGameObjectSpawned(GameObjectSpawned event)
+	{
+		final GameObject obj = event.getGameObject();
+		final ObjectComposition def = client.getObjectDefinition(obj.getId());
+		final String name = def != null ? def.getName() : null;
+		// Debug aid: surface reward-room chest object ids/names so the matching set can be verified/extended.
+		if (name != null && !"null".equals(name)
+			&& (name.toLowerCase().contains("chest") || name.toLowerCase().contains("sarcophagus")))
+		{
+			log.debug("object spawned id={} name='{}'", obj.getId(), name);
+		}
+		final RaidChest raid = raidByObject(obj.getId(), name);
+		if (raid == null || hasRollFor(raid.page))
+		{
+			return;
+		}
+		startChestAnticipation(raid, obj.getWorldLocation());
+	}
+
+	/**
+	 * Raids reward chests don't fire NpcLootReceived and have no dying NPC, so roll straight off the chest loot.
+	 * A purple chest (loot contains a unique) rolls only the uniques; a white chest rolls only the supplies.
+	 */
 	@Subscribe
 	public void onLootReceived(LootReceived event)
 	{
@@ -410,8 +526,8 @@ public class LoulettePlugin extends Plugin
 		{
 			return;
 		}
-		final String chest = raidChestPage(event.getName());
-		if (chest == null)
+		final RaidChest raid = raidByEventName(event.getName());
+		if (raid == null)
 		{
 			return;
 		}
@@ -420,31 +536,189 @@ public class LoulettePlugin extends Plugin
 		{
 			return;
 		}
-		final Player me = client.getLocalPlayer();
-		final WorldPoint loc = me != null ? me.getWorldLocation() : null;
-		rollFor(-1, loc, chest, new ArrayList<>(items), true);
+		final List<ItemStack> loot = new ArrayList<>(items);
+		final Set<Integer> uniqueIds = resolveUniqueIds(raid);
+		boolean purple = false;
+		for (ItemStack s : loot)
+		{
+			if (uniqueIds.contains(s.getId()))
+			{
+				purple = true;
+				break;
+			}
+		}
+
+		// Reuse the still-spinning anticipation reel so it lands in place; else anchor a fresh one.
+		ActiveRoll roll = findUnfinalisedRollByName(raid.page);
+		if (roll == null)
+		{
+			final Player me = client.getLocalPlayer();
+			roll = new ActiveRoll(-1, me != null ? me.getWorldLocation() : null,
+				System.currentTimeMillis(), raid.page);
+			activeRolls.add(roll);
+		}
+		finaliseChestRoll(raid, roll, loot, purple);
 	}
 
-	/** Maps a RuneLite raids loot-event name to the OSRS Wiki reward-chest page that holds its drop table. */
-	private static String raidChestPage(String name)
+	/** Builds a free-spinning reel over the reward-room chest, cycling the raid's unique ("purple") table. */
+	private void startChestAnticipation(RaidChest raid, WorldPoint loc)
+	{
+		final List<DropEntry> entries = dropTableService.table(raid.page).getNow(Collections.emptyList());
+		final ResolvedTable table = entries.isEmpty() ? tableCache.get(raid.page.toLowerCase()) : resolveTable(raid.page, entries);
+
+		final ActiveRoll roll = new ActiveRoll(-1, loc, System.currentTimeMillis(), raid.page);
+		roll.setAnticipation(true);
+		if (table != null)
+		{
+			roll.setPalette(table.getPalette());
+		}
+		activeRolls.add(roll);
+
+		final List<Integer> symbols = new ArrayList<>(resolveUniqueIds(raid));
+		symbols.add(NOTHING_ID);
+		padTo(symbols, MIN_POOL);
+		Collections.shuffle(symbols, random);
+		roll.getReels().add(new SlotReel(symbols, roll.getSpinStartMs(), config.spinSpeed()));
+		log.debug("chest anticipation '{}' (entered reward room)", raid.page);
+	}
+
+	/** Lands a chest reel: purples roll only the unique pool, whites roll only the supply pool. */
+	private void finaliseChestRoll(RaidChest raid, ActiveRoll roll, List<ItemStack> items, boolean purple)
+	{
+		final List<DropEntry> entries = dropTableService.table(raid.page).getNow(Collections.emptyList());
+		final ResolvedTable table = entries.isEmpty() ? tableCache.get(raid.page.toLowerCase()) : resolveTable(raid.page, entries);
+		if (table != null)
+		{
+			roll.setPalette(table.getPalette());
+		}
+		final Set<Integer> uniqueIds = resolveUniqueIds(raid);
+
+		final Set<Integer> pool = new LinkedHashSet<>();
+		final List<ItemStack> hits = new ArrayList<>();
+		if (purple)
+		{
+			pool.addAll(uniqueIds);
+			for (ItemStack s : items)
+			{
+				if (uniqueIds.contains(s.getId()))
+				{
+					hits.add(s);
+				}
+			}
+		}
+		else
+		{
+			final Set<Integer> alwaysIds = table != null ? table.getAlwaysIds() : Collections.emptySet();
+			if (table != null)
+			{
+				for (int id : table.getPool())
+				{
+					if (!uniqueIds.contains(id))
+					{
+						pool.add(id);
+					}
+				}
+			}
+			for (ItemStack s : items)
+			{
+				if (uniqueIds.contains(s.getId()) || alwaysIds.contains(s.getId()))
+				{
+					continue;
+				}
+				if (itemManager.getItemPrice(s.getId()) < config.minItemValue())
+				{
+					continue;
+				}
+				hits.add(s);
+				pool.add(s.getId());
+			}
+		}
+		hits.sort((a, b) -> Long.compare(value(b), value(a)));
+
+		int rolls = Math.min(Math.max(hits.size(), 1), config.maxReels());
+		pool.add(NOTHING_ID);
+		final List<Integer> basePool = new ArrayList<>(pool);
+		final long now = System.currentTimeMillis();
+		final int settle = config.settleMs();
+		final List<SlotReel> reels = new ArrayList<>();
+
+		final int hitCount = Math.min(hits.size(), rolls);
+		for (int i = 0; i < hitCount; i++)
+		{
+			final ItemStack s = hits.get(i);
+			reels.add(buildReel(basePool, roll.getSpinStartMs(), now, s.getId(), s.getQuantity(), settle));
+		}
+		for (int i = hitCount; i < rolls; i++)
+		{
+			reels.add(buildReel(basePool, roll.getSpinStartMs(), now, NOTHING_ID, 1, settle));
+		}
+		roll.setReels(reels);
+		log.debug("finalise chest '{}' purple={} rolls={} hits={}", raid.page, purple, rolls, hits.size());
+	}
+
+	/** True for raid room bosses whose loot is delivered by the raid chest, so they must not roll themselves. */
+	private static boolean isRaidChestBoss(String name)
+	{
+		return name != null && RAID_CHEST_BOSSES.contains(name.toLowerCase());
+	}
+
+	private static RaidChest raidByObject(int id, String name)
+	{
+		final String lower = name == null ? null : name.toLowerCase();
+		for (RaidChest raid : RAID_CHESTS)
+		{
+			if (raid.objectIds.contains(id) || (lower != null && raid.objectNames.contains(lower)))
+			{
+				return raid;
+			}
+		}
+		return null;
+	}
+
+	private static RaidChest raidByEventName(String name)
 	{
 		if (name == null)
 		{
 			return null;
 		}
-		if (name.startsWith("Chambers of Xeric"))
+		for (RaidChest raid : RAID_CHESTS)
 		{
-			return "Ancient chest";
-		}
-		if (name.startsWith("Theatre of Blood"))
-		{
-			return "Monumental chest";
-		}
-		if (name.startsWith("Tombs of Amascut"))
-		{
-			return "Chest (Tombs of Amascut)";
+			if (name.startsWith(raid.eventPrefix))
+			{
+				return raid;
+			}
 		}
 		return null;
+	}
+
+	private Set<Integer> resolveUniqueIds(RaidChest raid)
+	{
+		return raidUniqueIds.computeIfAbsent(raid.page, k ->
+		{
+			final Set<Integer> ids = new HashSet<>();
+			for (String name : raid.uniqueNames)
+			{
+				final int id = resolveItemId(name);
+				if (id > 0)
+				{
+					ids.add(id);
+				}
+			}
+			return ids;
+		});
+	}
+
+	/** True if any roll (spinning or landed) is already showing for this chest page. */
+	private boolean hasRollFor(String page)
+	{
+		for (ActiveRoll roll : activeRolls)
+		{
+			if (page.equalsIgnoreCase(roll.getMonster()))
+			{
+				return true;
+			}
+		}
+		return false;
 	}
 
 	/** Records the drop and spins a roll for a loot source (NPC kill or raids chest), reusing any in-flight roll. */
@@ -575,6 +849,7 @@ public class LoulettePlugin extends Plugin
 			return existing;
 		}
 
+		final boolean hideRdt = config.hideRareDropTable();
 		final Set<String> nonAlwaysNames = new LinkedHashSet<>();
 		final Set<String> anyAlwaysNames = new HashSet<>();
 		final Map<Integer, Integer> rollCounts = new HashMap<>();
@@ -585,8 +860,10 @@ public class LoulettePlugin extends Plugin
 			{
 				anyAlwaysNames.add(e.getName());
 			}
-			else
+			else if (!(hideRdt && e.isRdt()))
 			{
+				// Skip shared rare/gem/mega drop-table rows; a name shared with a real drop keeps that row's
+				// chance/colour, and an item with only rare-table rows drops out of the reel pool entirely.
 				nonAlwaysNames.add(e.getName());
 				rollCounts.merge(e.getRolls(), 1, Integer::sum);
 				nameChance.merge(e.getName(), e.getChance(), LoulettePlugin::rarer);
@@ -717,6 +994,13 @@ public class LoulettePlugin extends Plugin
 		if (name.equalsIgnoreCase("Coins"))
 		{
 			return COINS_ITEM_ID;
+		}
+		// Prefer the bundled id: it covers untradeables (pets, clue scrolls, boss uniques) that
+		// ItemManager.search — which only knows GE-tradeable items — would otherwise drop from the reel.
+		final int bundled = dropTableService.itemId(name);
+		if (bundled > 0)
+		{
+			return bundled;
 		}
 		final List<ItemPrice> results = itemManager.search(name);
 		if (results.isEmpty())
