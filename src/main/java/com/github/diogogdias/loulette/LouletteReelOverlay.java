@@ -1,7 +1,9 @@
 package com.github.diogogdias.loulette;
 
+import java.awt.AlphaComposite;
 import java.awt.BasicStroke;
 import java.awt.Color;
+import java.awt.Composite;
 import java.awt.Dimension;
 import java.awt.Font;
 import java.awt.FontMetrics;
@@ -91,6 +93,26 @@ class LouletteReelOverlay extends Overlay
 		final int width = STRIP_W + PAD * 2;
 		final int height = PAD * 2 + groups * HEADER + rows * (rowH + ROW_GAP);
 
+		// Fade the strip out over config.fadeMs() after the result hold instead of blinking off. Use the slowest-
+		// fading roll so the box stays until the last result has faded.
+		float alpha = 0f;
+		for (ActiveRoll roll : rolls)
+		{
+			for (SlotReel reel : roll.getReels())
+			{
+				alpha = Math.max(alpha, (float) reel.fadeAlpha(now, config.resultHoldMs(), config.fadeMs()));
+			}
+		}
+		if (alpha <= 0f)
+		{
+			return null;
+		}
+		final Composite oldComposite = g.getComposite();
+		if (alpha < 1f)
+		{
+			g.setComposite(AlphaComposite.getInstance(AlphaComposite.SRC_OVER, alpha));
+		}
+
 		g.setColor(BG);
 		g.fillRoundRect(0, 0, width, height, 8, 8);
 		g.setColor(FRAME);
@@ -120,6 +142,7 @@ class LouletteReelOverlay extends Overlay
 			}
 		}
 
+		g.setComposite(oldComposite);
 		return new Dimension(width, height);
 	}
 

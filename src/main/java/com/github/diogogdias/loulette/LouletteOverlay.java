@@ -1,7 +1,9 @@
 package com.github.diogogdias.loulette;
 
+import java.awt.AlphaComposite;
 import java.awt.BasicStroke;
 import java.awt.Color;
+import java.awt.Composite;
 import java.awt.Dimension;
 import java.awt.Font;
 import java.awt.FontMetrics;
@@ -85,7 +87,52 @@ class LouletteOverlay extends Overlay
 			return;
 		}
 
-		final LocalPoint lp = LocalPoint.fromWorld(client, roll.getLocation());
+		// Fade the whole cluster out over config.fadeMs() after the result hold, instead of blinking off.
+		float alpha = 0f;
+		for (SlotReel reel : reels)
+		{
+			alpha = Math.max(alpha, (float) reel.fadeAlpha(now, config.resultHoldMs(), config.fadeMs()));
+		}
+		if (alpha <= 0f)
+		{
+			return;
+		}
+		final Composite oldComposite = g.getComposite();
+		if (alpha < 1f)
+		{
+			g.setComposite(AlphaComposite.getInstance(AlphaComposite.SRC_OVER, alpha));
+		}
+		try
+		{
+			drawClusterBody(g, roll, reels, now);
+		}
+		finally
+		{
+			g.setComposite(oldComposite);
+		}
+	}
+
+	private void drawClusterBody(Graphics2D g, ActiveRoll roll, List<SlotReel> reels, long now)
+	{
+
+		final VerticalAnchor anchorMode = config.verticalAnchor();
+		LocalPoint lp;
+		if (anchorMode == VerticalAnchor.PLAYER && client.getLocalPlayer() != null)
+		{
+			// Follow the player instead of the death tile.
+			lp = client.getLocalPlayer().getLocalLocation();
+		}
+		else
+		{
+			// getLocation() is the NPC's south-west footprint tile. When configured to centre, shift to the middle
+			// of the footprint (only meaningful for 3x3+; one tile = 128 local units, so the centre is (size-1)*64 NE).
+			lp = LocalPoint.fromWorld(client, roll.getLocation());
+			if (lp != null && anchorMode == VerticalAnchor.CENTER && roll.getNpcSize() >= 3)
+			{
+				final int off = (roll.getNpcSize() - 1) * 64;
+				lp = new LocalPoint(lp.getX() + off, lp.getY() + off);
+			}
+		}
 		if (lp == null)
 		{
 			return;

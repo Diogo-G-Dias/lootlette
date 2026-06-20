@@ -43,6 +43,11 @@ class ActiveRoll
 	@Setter
 	private boolean persistent;
 
+	// Footprint side length of the source NPC (tiles), used to optionally centre the vertical reel. 1 for chests
+	// and anything without an NPC.
+	@Setter
+	private int npcSize = 1;
+
 	// item id -> CS:GO rarity-grade colour for this monster's table
 	@Setter
 	private Map<Integer, Color> palette = Collections.emptyMap();
@@ -62,7 +67,7 @@ class ActiveRoll
 		finalised = true;
 	}
 
-	boolean done(long now, long lingerMs)
+	boolean done(long now, long lingerMs, long fadeMs)
 	{
 		if (reels.isEmpty())
 		{
@@ -70,7 +75,7 @@ class ActiveRoll
 		}
 		for (SlotReel reel : reels)
 		{
-			if (!reel.expired(now, lingerMs))
+			if (!reel.expired(now, lingerMs, fadeMs))
 			{
 				return false;
 			}

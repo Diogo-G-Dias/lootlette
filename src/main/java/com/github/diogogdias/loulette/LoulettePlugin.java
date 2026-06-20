@@ -29,6 +29,7 @@ import net.runelite.api.NPCComposition;
 import net.runelite.api.ObjectComposition;
 import net.runelite.api.Player;
 import net.runelite.api.Varbits;
+import net.runelite.api.WallObject;
 import net.runelite.api.coords.WorldPoint;
 import net.runelite.api.events.ChatMessage;
 import net.runelite.api.events.GameObjectSpawned;
@@ -37,6 +38,8 @@ import net.runelite.api.events.GameTick;
 import net.runelite.api.events.MenuOpened;
 import net.runelite.api.events.MenuOptionClicked;
 import net.runelite.api.events.NpcDespawned;
+import net.runelite.api.events.WallObjectSpawned;
+import net.runelite.client.audio.AudioPlayer;
 import net.runelite.client.callback.ClientThread;
 import net.runelite.client.config.ConfigManager;
 import net.runelite.client.eventbus.Subscribe;
@@ -113,17 +116,19 @@ public class LoulettePlugin extends Plugin
 			"dinh's bulwark", "ancestral hat", "ancestral robe top", "ancestral robe bottom", "dragon claws",
 			"elder maul", "kodai insignia", "twisted bow", "olmlet", "twisted ancestral colour kit",
 			"metamorphic dust"),
-		// Theatre of Blood — Monumental chest. Match the PLAYER'S closed chest only (32992 regular, 32993 unique),
-		// not teammates' (32990/32991) or the opened ids, so the reel anchors on your own chest. No name-match
-		// (every party chest shares the name "Monumental chest").
-		new RaidChest(new HashSet<>(Arrays.asList(32992, 32993)), Collections.emptySet(),
+		// Theatre of Blood — reward room chests are per-seat multilocs resolved via getImpostor, so the spawn is
+		// special-cased in onGameObjectSpawned (see TOB_CHEST_SPAWN_IDS) rather than matched here. This entry just
+		// carries the loot-event name + unique set for landing.
+		new RaidChest(Collections.emptySet(), Collections.emptySet(),
 			"Theatre of Blood", "Monumental chest",
 			"avernic defender hilt", "ghrazi rapier", "sanguinesti staff (uncharged)", "justiciar faceguard",
 			"justiciar chestguard", "justiciar legguards", "scythe of vitur (uncharged)", "holy ornament kit",
 			"sanguine ornament kit", "sanguine dust", "lil' zik"),
-		// Tombs of Amascut — reward vault chest (closed 41696 + per-player closed variants 44787-44792). Name is
-		// generic ("Chest"), so match by id only. 44786 is the opened state — excluded so the reel fires on entry.
-		new RaidChest(new HashSet<>(Arrays.asList(41696, 44787, 44788, 44789, 44790, 44791, 44792)), Collections.emptySet(),
+		// Tombs of Amascut — reward room has no reliable per-player chest object (the vault chests don't map to a
+		// seat), so the reel is anchored on the shared sarcophagus WallObject in onWallObjectSpawned (see
+		// TOA_SARCOPHAGUS_WALL_ID) and narrowed from the tomb varbits. This entry carries the loot-event name +
+		// unique set for landing.
+		new RaidChest(Collections.emptySet(), Collections.emptySet(),
 			"Tombs of Amascut", "Chest (Tombs of Amascut)",
 			"osmumten's fang", "tumeken's shadow (uncharged)", "elidinis' ward", "lightbearer", "masori mask",
 			"masori body", "masori chaps", "eye of the corruptor", "jewel of the sun", "breach of the scarab",
@@ -135,13 +140,31 @@ public class LoulettePlugin extends Plugin
 			"avernic treads", "eye of ayak (uncharged)", "mokhaiotl cloth", "dom")
 	);
 
+	// Theatre of Blood reward room: the five per-seat chests spawn as multilocs (33086-33090) that the client
+	// resolves (getImpostor) into owner+rarity variants — 32993 = mine+purple, 32992 = mine+normal, 32991/32990 =
+	// a teammate's. Only the local player's own chest should anchor a reel. (Mechanism from the tob-light-colors
+	// plugin; the impostor read happens at spawn, before the chest is opened.)
+	private static final Set<Integer> TOB_CHEST_SPAWN_IDS = new HashSet<>(
+		Arrays.asList(33086, 33087, 33088, 33089, 33090));
+	private static final int TOB_CHEST_MINE_NORMAL = 32992;
+	private static final int TOB_CHEST_MINE_PURPLE = 32993;
+
+	// Tombs of Amascut reward room: anchor on the shared back-wall sarcophagus (a WallObject, present in all party
+	// sizes) and read the tomb varbits to learn purple-vs-white up front, before the chest is opened. Mechanism
+	// from LlemonDuck's tombs-of-amascut plugin: varbit 14373 odd => a purple dropped this raid; if any seat varbit
+	// reads 2 ("chest key"), that purple belongs to a teammate — otherwise it's the local player's.
+	private static final int TOA_SARCOPHAGUS_WALL_ID = 46221;
+	private static final int TOA_VARBIT_SARCOPHAGUS_PURPLE = 14373;
+	private static final int[] TOA_VARBIT_CHEST_SEATS = {14356, 14357, 14358, 14359, 14360, 14370, 14371, 14372};
+	private static final int TOA_VARBIT_CHEST_KEY = 2;
+
 	private static final int COINS_ITEM_ID = 995;
 	private static final long ENGAGE_MS = 6000;
 	// How long a reel free-spins waiting for its loot before giving up. Harvests can take 10s+ to yield, so the
 	// spinner is also kept alive as long as the player keeps interacting with the creature (see onGameTick).
 	private static final long PRESPIN_TIMEOUT_MS = 15000;
-	// Safety cap on a persistent (CoX, Olm-kill) anticipation if the loot never lands (e.g. you leave the raid).
-	private static final long PERSISTENT_ANTICIPATION_MS = 300000;
+	// Fixed cap on how many reels (rolls) are shown for one kill.
+	private static final int MAX_REELS = 5;
 	private static final int MIN_POOL = 6;
 	private static final int MIN_LAND_LOOPS = 1;
 
@@ -171,6 +194,9 @@ public class LoulettePlugin extends Plugin
 
 	@Inject
 	private ConfigManager configManager;
+
+	@Inject
+	private AudioPlayer audioPlayer;
 
 	// NPC names (lower-cased) the player has chosen to never roll a reel for. Persisted in the ignoredNpcs config.
 	private final Set<String> ignoredNpcs = ConcurrentHashMap.newKeySet();
@@ -314,7 +340,7 @@ public class LoulettePlugin extends Plugin
 			: -1;
 		activeRolls.removeIf(roll ->
 		{
-			if (roll.done(now, config.resultHoldMs()))
+			if (roll.done(now, config.resultHoldMs(), config.fadeMs()))
 			{
 				return true;
 			}
@@ -326,7 +352,9 @@ public class LoulettePlugin extends Plugin
 			// persistent (Olm-kill) one spins until the loot lands, capped by a long safety timeout.
 			if (roll.isAnticipation())
 			{
-				final long ttl = roll.isPersistent() ? PERSISTENT_ANTICIPATION_MS : 2L * config.resultHoldMs();
+				final long ttl = roll.isPersistent()
+					? config.anticipationTimeoutSeconds() * 1000L
+					: 2L * config.resultHoldMs();
 				return now > roll.getSpinStartMs() + ttl;
 			}
 			return now > roll.getSpinStartMs() + PRESPIN_TIMEOUT_MS && roll.getNpcIndex() != interactingIndex;
@@ -446,6 +474,11 @@ public class LoulettePlugin extends Plugin
 			return;
 		}
 		final ActiveRoll roll = new ActiveRoll(npc.getIndex(), npc.getWorldLocation(), now, monster);
+		final NPCComposition comp = npc.getComposition();
+		if (comp != null)
+		{
+			roll.setNpcSize(comp.getSize());
+		}
 		roll.setPalette(table != null ? table.getPalette() : Collections.emptyMap());
 		activeRolls.add(roll);
 
@@ -640,18 +673,82 @@ public class LoulettePlugin extends Plugin
 		{
 			log.debug("object spawned id={} name='{}'", obj.getId(), name);
 		}
+		// Theatre of Blood: resolve the per-seat multiloc to its owner+rarity impostor; only the local player's
+		// own chest (32992/32993) anchors a reel — teammates' chests (32990/32991) are skipped.
+		if (TOB_CHEST_SPAWN_IDS.contains(obj.getId()))
+		{
+			final ObjectComposition imp = def != null ? def.getImpostor() : null;
+			final int impId = imp != null ? imp.getId() : -1;
+			log.debug("ToB chest spawn id={} impostor={}", obj.getId(), impId);
+			if (impId == TOB_CHEST_MINE_NORMAL || impId == TOB_CHEST_MINE_PURPLE)
+			{
+				final RaidChest tob = raidByEventName("Theatre of Blood");
+				if (tob != null && !hasRollFor(tob.page))
+				{
+					// Vertical, persistent reel over my chest; lands when the loot event fires on open. The impostor
+					// already tells us the rarity, so narrow immediately: purple (32993) cycles uniques, normal
+					// (32992) cycles the regular supply pool — a white chest never spins purples.
+					startChestAnticipation(tob, obj.getWorldLocation(), false, true, true);
+					final ActiveRoll roll = findUnfinalisedRollByName(tob.page);
+					if (roll != null)
+					{
+						switchAnticipationPool(roll, impId == TOB_CHEST_MINE_PURPLE, tob);
+					}
+				}
+			}
+			return;
+		}
+		// ToB and ToA are special-cased above (impostor / sarcophagus); the only GameObject-matched raid left here
+		// is Doom's golden hole, which spawns only when a unique rolled — spin the uniques pool on a short timeout.
 		final RaidChest raid = raidByObject(obj.getId(), name);
 		if (raid == null || hasRollFor(raid.page))
 		{
 			return;
 		}
-		// Doom's golden hole only spawns when a unique rolled, so spin the uniques pool on a short timeout. The
-		// reward chests (ToB/ToA) can take 15s+ to walk to and open, so spin the FULL table persistently until the
-		// player's own loot lands (a teammate opening theirs no longer times it out), anchored vertically.
-		final boolean doom = "Doom of Mokhaiotl".equals(raid.page);
-		startChestAnticipation(raid, obj.getWorldLocation(), false, !doom, !doom);
+		startChestAnticipation(raid, obj.getWorldLocation(), false, false, false);
 	}
 
+	/**
+	 * Tombs of Amascut: the tomb reward room's shared back-wall sarcophagus spawns on entry. Anchor a vertical,
+	 * persistent, full-pool reel on it and narrow to purple/white immediately from the tomb varbits (it lands on
+	 * the real loot when the chest is opened). There's no per-seat chest object that maps to the local player, so
+	 * this shared anchor is the reliable choice in every party size.
+	 */
+	@Subscribe
+	public void onWallObjectSpawned(WallObjectSpawned event)
+	{
+		final WallObject obj = event.getWallObject();
+		if (obj.getId() != TOA_SARCOPHAGUS_WALL_ID)
+		{
+			return;
+		}
+		final RaidChest toa = raidByEventName("Tombs of Amascut");
+		if (toa == null || hasRollFor(toa.page))
+		{
+			return;
+		}
+		startChestAnticipation(toa, obj.getWorldLocation(), false, true, true);
+
+		// Early narrow: a purple this raid (varbit 14373 odd) that no other seat owns (no seat varbit == 2) is mine.
+		final boolean purpleThisRaid = client.getVarbitValue(TOA_VARBIT_SARCOPHAGUS_PURPLE) % 2 != 0;
+		boolean purpleMine = true;
+		for (int vb : TOA_VARBIT_CHEST_SEATS)
+		{
+			if (client.getVarbitValue(vb) == TOA_VARBIT_CHEST_KEY)
+			{
+				purpleMine = false;
+				break;
+			}
+		}
+		final boolean myChestPurple = purpleThisRaid && purpleMine;
+		log.debug("ToA sarcophagus spawned -> anticipation (purpleThisRaid={} mine={} -> {})",
+			purpleThisRaid, purpleMine, myChestPurple ? "uniques" : "supplies");
+		final ActiveRoll roll = findUnfinalisedRollByName(toa.page);
+		if (roll != null)
+		{
+			switchAnticipationPool(roll, myChestPurple, toa);
+		}
+	}
 
 	/**
 	 * Raids reward chests don't fire NpcLootReceived and have no dying NPC, so roll straight off the chest loot.
@@ -766,12 +863,12 @@ public class LoulettePlugin extends Plugin
 		// narrow if we're still on the full pool, so a purple is never downgraded to white by a later supply line.
 		if (unique)
 		{
-			switchAnticipationPool(cox, true);
+			switchAnticipationPool(cox, true, raid);
 			coxNarrow = 2;
 		}
 		else if (coxNarrow == 0)
 		{
-			switchAnticipationPool(cox, false);
+			switchAnticipationPool(cox, false, raid);
 			coxNarrow = 1;
 		}
 	}
@@ -783,12 +880,12 @@ public class LoulettePlugin extends Plugin
 	}
 
 	/**
-	 * CoX: once the "Valuable drop:" lines reveal purple-vs-white, swap the still-spinning full-pool reel to
-	 * uniques-only (purple) or supplies-only (white) in place, keeping it spinning. It lands later on the real loot.
+	 * Once the chest's rarity is revealed early (CoX "Valuable drop:" lines, ToA tomb varbits), swap the
+	 * still-spinning full-pool reel to uniques-only (purple) or supplies-only (white) in place, keeping it
+	 * spinning. It lands later on the real loot.
 	 */
-	private void switchAnticipationPool(ActiveRoll roll, boolean purple)
+	private void switchAnticipationPool(ActiveRoll roll, boolean purple, RaidChest raid)
 	{
-		final RaidChest raid = raidByEventName("Chambers of Xeric");
 		if (raid == null || roll.getReels().isEmpty())
 		{
 			return;
@@ -899,7 +996,9 @@ public class LoulettePlugin extends Plugin
 				{
 					continue;
 				}
-				if (itemManager.getItemPrice(s.getId()) < config.minItemValue())
+				// Min-value filter applies only to known (tradeable) prices; keep untradeables (price 0).
+				final int price = itemManager.getItemPrice(s.getId());
+				if (price > 0 && price < config.minItemValue())
 				{
 					continue;
 				}
@@ -909,7 +1008,7 @@ public class LoulettePlugin extends Plugin
 		}
 		hits.sort((a, b) -> Long.compare(value(b), value(a)));
 
-		int rolls = Math.min(Math.max(hits.size(), 1), config.maxReels());
+		int rolls = Math.min(Math.max(hits.size(), 1), MAX_REELS);
 		pool.add(NOTHING_ID);
 		final List<Integer> basePool = new ArrayList<>(pool);
 		final long now = System.currentTimeMillis();
@@ -927,7 +1026,31 @@ public class LoulettePlugin extends Plugin
 			reels.add(buildReel(basePool, roll.getSpinStartMs(), now, NOTHING_ID, 1, settle));
 		}
 		roll.setReels(reels);
+		// A purple chest with a real unique hit is the headline "you got a unique" moment — cha-ching.
+		if (purple && !hits.isEmpty())
+		{
+			playUniqueSound();
+		}
 		log.debug("finalise chest '{}' purple={} rolls={} hits={}", raid.page, purple, rolls, hits.size());
+	}
+
+	private static final String CHA_CHING_WAV = "cha-ching.wav";
+
+	/** Plays the 'cha-ching' sound for a unique drop (raid purple or a very rare hit), if enabled. */
+	private void playUniqueSound()
+	{
+		if (!config.uniqueDropSound())
+		{
+			return;
+		}
+		try
+		{
+			audioPlayer.play(getClass(), CHA_CHING_WAV, 0f);
+		}
+		catch (Exception e)
+		{
+			log.debug("could not play unique-drop sound", e);
+		}
 	}
 
 	private static boolean matchesAny(String haystack, String... needles)
@@ -1071,7 +1194,10 @@ public class LoulettePlugin extends Plugin
 			{
 				continue;
 			}
-			if (itemManager.getItemPrice(s.getId()) < config.minItemValue())
+			// The min-value filter only applies to items with a KNOWN (tradeable) price; untradeables return
+			// price 0, which is "unknown" not "worthless" — clue scrolls/boxes, pets, fragments must still land.
+			final int price = itemManager.getItemPrice(s.getId());
+			if (price > 0 && price < config.minItemValue())
 			{
 				continue;
 			}
@@ -1082,7 +1208,7 @@ public class LoulettePlugin extends Plugin
 
 		final int mainRolls = haveWiki ? table.getMainRolls() : hits.size();
 		int rolls = Math.max(mainRolls, hits.size());
-		rolls = Math.min(rolls, config.maxReels());
+		rolls = Math.min(rolls, MAX_REELS);
 
 		if (rolls <= 0)
 		{
@@ -1108,6 +1234,20 @@ public class LoulettePlugin extends Plugin
 		}
 
 		roll.setReels(reels);
+		// Cha-ching if any landed hit is a very rare (rarer than 1/1000) drop — pets, boss uniques, etc. Needs a
+		// resolved wiki palette to know rarity; the seen-drops fallback has none, so it simply won't fire there.
+		if (haveWiki)
+		{
+			final Color veryRare = config.colourVeryRare();
+			for (int i = 0; i < hitCount; i++)
+			{
+				if (veryRare.equals(roll.getPalette().get(hits.get(i).getId())))
+				{
+					playUniqueSound();
+					break;
+				}
+			}
+		}
 		log.debug("finalise '{}' rolls={} hits={} (loot spawned)", roll.getMonster(), rolls, hits.size());
 	}
 

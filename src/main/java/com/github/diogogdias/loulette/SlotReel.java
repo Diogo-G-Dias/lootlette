@@ -67,9 +67,32 @@ class SlotReel
 		return landing && now >= landStartMs + landDurationMs;
 	}
 
-	boolean expired(long now, long lingerMs)
+	boolean expired(long now, long lingerMs, long fadeMs)
 	{
-		return landing && now > landStartMs + landDurationMs + lingerMs;
+		return landing && now > landStartMs + landDurationMs + lingerMs + fadeMs;
+	}
+
+	/**
+	 * Opacity for drawing: 1.0 while spinning and through the full {@code lingerMs} result hold, then ramping
+	 * down to 0 over the following {@code fadeMs} so the reel fades out instead of blinking off.
+	 */
+	double fadeAlpha(long now, long lingerMs, long fadeMs)
+	{
+		if (!landed(now))
+		{
+			return 1.0;
+		}
+		final long sinceResult = now - (landStartMs + landDurationMs);
+		if (sinceResult <= lingerMs)
+		{
+			return 1.0;
+		}
+		if (fadeMs <= 0)
+		{
+			return 0.0;
+		}
+		final long fadeElapsed = sinceResult - lingerMs;
+		return fadeElapsed >= fadeMs ? 0.0 : 1.0 - (double) fadeElapsed / fadeMs;
 	}
 
 	private static double clamp(double v)
