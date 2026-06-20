@@ -201,4 +201,30 @@ public interface LouletteConfig extends Config
 	{
 		return false;
 	}
+
+	@ConfigItem(
+		keyName = "rightClickIgnore",
+		name = "Right-click ignore",
+		description = "Add a 'Lootlette-ignore' option to NPC right-click menus. Ignored NPCs never roll a reel; "
+			+ "right-click again to 'Lootlette-unignore'. The ignore list persists across sessions.",
+		position = 9
+	)
+	default boolean rightClickIgnore()
+	{
+		return false;
+	}
+
+	@ConfigItem(
+		keyName = "ignoredNpcs",
+		name = "Ignored NPCs",
+		description = "Comma-separated NPC names that never roll a reel (managed via the right-click menu).",
+		position = 10,
+		hidden = true
+	)
+	default String ignoredNpcs()
+	{
+		// CoX Scavenger beasts deliver their loot via ServerNpcLoot (not the chest), so they slip past the
+		// in-raid suppression and spin a reel on every kill. Ignore them out of the box; users can unignore.
+		return "Scavenger beast";
+	}
 }

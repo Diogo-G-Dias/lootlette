@@ -57,6 +57,11 @@ class LouletteReelOverlay extends Overlay
 		final List<ActiveRoll> rolls = new ArrayList<>();
 		for (ActiveRoll roll : plugin.getActiveRolls())
 		{
+			// Object-anchored chest reels are pinned vertical; never pull them onto the top-centre strip.
+			if (roll.isForceVertical())
+			{
+				continue;
+			}
 			if (all || roll.isForceHorizontal())
 			{
 				rolls.add(roll);

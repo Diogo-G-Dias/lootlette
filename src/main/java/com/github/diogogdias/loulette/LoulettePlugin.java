@@ -18,18 +18,23 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.awt.Color;
 import javax.inject.Inject;
 import lombok.extern.slf4j.Slf4j;
+import net.runelite.api.ChatMessageType;
 import net.runelite.api.Client;
 import net.runelite.api.GameObject;
 import net.runelite.api.GameState;
+import net.runelite.api.MenuAction;
 import net.runelite.api.MenuEntry;
 import net.runelite.api.NPC;
 import net.runelite.api.NPCComposition;
 import net.runelite.api.ObjectComposition;
 import net.runelite.api.Player;
+import net.runelite.api.Varbits;
 import net.runelite.api.coords.WorldPoint;
+import net.runelite.api.events.ChatMessage;
 import net.runelite.api.events.GameObjectSpawned;
 import net.runelite.api.events.GameStateChanged;
 import net.runelite.api.events.GameTick;
+import net.runelite.api.events.MenuOpened;
 import net.runelite.api.events.MenuOptionClicked;
 import net.runelite.api.events.NpcDespawned;
 import net.runelite.client.callback.ClientThread;
@@ -71,7 +76,9 @@ public class LoulettePlugin extends Plugin
 	private static final Set<String> RAID_CHEST_BOSSES = new HashSet<>(Arrays.asList(
 		// Theatre of Blood
 		"the maiden of sugadinti", "maiden of sugadinti", "pestilent bloat", "nylocas vasilias",
-		"sotetseg", "xarpus", "verzik vitur"
+		"sotetseg", "xarpus", "verzik vitur",
+		// Doom of Mokhaiotl — loot is collected from the post-kill burrow hole, not the boss corpse.
+		"doom of mokhaiotl"
 	));
 
 	/**
@@ -98,25 +105,34 @@ public class LoulettePlugin extends Plugin
 	}
 
 	private static final List<RaidChest> RAID_CHESTS = Arrays.asList(
-		// Chambers of Xeric — Ancient chest (RAIDS_REWARD_CHEST)
-		new RaidChest(new HashSet<>(Arrays.asList(30028)), new HashSet<>(Arrays.asList("ancient chest")),
+		// Chambers of Xeric — no chest-spawn anticipation. Instead the reel starts on the Olm kill (raid-complete
+		// message) and spins until the loot lands (see onChatMessage). Kept here for the unique set + loot event.
+		new RaidChest(Collections.emptySet(), Collections.emptySet(),
 			"Chambers of Xeric", "Ancient chest",
 			"dexterous prayer scroll", "arcane prayer scroll", "twisted buckler", "dragon hunter crossbow",
 			"dinh's bulwark", "ancestral hat", "ancestral robe top", "ancestral robe bottom", "dragon claws",
 			"elder maul", "kodai insignia", "twisted bow", "olmlet", "twisted ancestral colour kit",
 			"metamorphic dust"),
-		// Theatre of Blood — Monumental chest (TOBANCHEST)
-		new RaidChest(new HashSet<>(Arrays.asList(2790)), new HashSet<>(Arrays.asList("monumental chest")),
+		// Theatre of Blood — Monumental chest. Match the PLAYER'S closed chest only (32992 regular, 32993 unique),
+		// not teammates' (32990/32991) or the opened ids, so the reel anchors on your own chest. No name-match
+		// (every party chest shares the name "Monumental chest").
+		new RaidChest(new HashSet<>(Arrays.asList(32992, 32993)), Collections.emptySet(),
 			"Theatre of Blood", "Monumental chest",
 			"avernic defender hilt", "ghrazi rapier", "sanguinesti staff (uncharged)", "justiciar faceguard",
 			"justiciar chestguard", "justiciar legguards", "scythe of vitur (uncharged)", "holy ornament kit",
 			"sanguine ornament kit", "sanguine dust", "lil' zik"),
-		// Tombs of Amascut — Chest (TOA_VAULT_CHEST_LOC0). Name is generic ("Chest"), so match by id only.
-		new RaidChest(new HashSet<>(Arrays.asList(29994)), Collections.emptySet(),
+		// Tombs of Amascut — reward vault chest (closed 41696 + per-player closed variants 44787-44792). Name is
+		// generic ("Chest"), so match by id only. 44786 is the opened state — excluded so the reel fires on entry.
+		new RaidChest(new HashSet<>(Arrays.asList(41696, 44787, 44788, 44789, 44790, 44791, 44792)), Collections.emptySet(),
 			"Tombs of Amascut", "Chest (Tombs of Amascut)",
 			"osmumten's fang", "tumeken's shadow (uncharged)", "elidinis' ward", "lightbearer", "masori mask",
 			"masori body", "masori chaps", "eye of the corruptor", "jewel of the sun", "breach of the scarab",
-			"jewel of amascut", "tumeken's guardian")
+			"jewel of amascut", "tumeken's guardian"),
+		// Doom of Mokhaiotl — the post-kill burrow hole glows gold (object 50940) only when a unique is rolled;
+		// match that id alone so the anticipation reel of uniques appears just for golden holes (normal hole is 57285).
+		new RaidChest(new HashSet<>(Arrays.asList(50940)), Collections.emptySet(),
+			"Doom of Mokhaiotl", "Doom of Mokhaiotl",
+			"avernic treads", "eye of ayak (uncharged)", "mokhaiotl cloth", "dom")
 	);
 
 	private static final int COINS_ITEM_ID = 995;
@@ -124,6 +140,8 @@ public class LoulettePlugin extends Plugin
 	// How long a reel free-spins waiting for its loot before giving up. Harvests can take 10s+ to yield, so the
 	// spinner is also kept alive as long as the player keeps interacting with the creature (see onGameTick).
 	private static final long PRESPIN_TIMEOUT_MS = 15000;
+	// Safety cap on a persistent (CoX, Olm-kill) anticipation if the loot never lands (e.g. you leave the raid).
+	private static final long PERSISTENT_ANTICIPATION_MS = 300000;
 	private static final int MIN_POOL = 6;
 	private static final int MIN_LAND_LOOPS = 1;
 
@@ -151,6 +169,12 @@ public class LoulettePlugin extends Plugin
 	@Inject
 	private LouletteConfig config;
 
+	@Inject
+	private ConfigManager configManager;
+
+	// NPC names (lower-cased) the player has chosen to never roll a reel for. Persisted in the ignoredNpcs config.
+	private final Set<String> ignoredNpcs = ConcurrentHashMap.newKeySet();
+
 	private final List<ActiveRoll> activeRolls = new CopyOnWriteArrayList<>();
 	private final Map<String, Set<Integer>> seenDrops = new ConcurrentHashMap<>();
 	private final Set<Integer> globalSeen = ConcurrentHashMap.newKeySet();
@@ -164,11 +188,17 @@ public class LoulettePlugin extends Plugin
 	private final Map<String, Integer> handledLootTick = new ConcurrentHashMap<>();
 	private final Random random = new Random();
 
+	// CoX early switch: between Olm's head death and the chest loot, the "Valuable drop:" chat lines reveal the
+	// loot ~3s early. Narrow the spinning reel the instant the first such line lands. 0 = still full pool,
+	// 1 = narrowed to supplies (white), 2 = narrowed to uniques (purple); only ever progresses upward.
+	private int coxNarrow;
+
 	@Override
 	protected void startUp()
 	{
 		overlayManager.add(overlay);
 		overlayManager.add(reelOverlay);
+		loadIgnoredNpcs();
 		log.debug("Lootlette started");
 	}
 
@@ -202,6 +232,44 @@ public class LoulettePlugin extends Plugin
 		{
 			tableCache.clear();
 		}
+		if (CONFIG_GROUP.equals(event.getGroup()) && "ignoredNpcs".equals(event.getKey()))
+		{
+			loadIgnoredNpcs();
+		}
+	}
+
+	private void loadIgnoredNpcs()
+	{
+		ignoredNpcs.clear();
+		for (String s : config.ignoredNpcs().split(","))
+		{
+			final String name = s.trim().toLowerCase();
+			if (!name.isEmpty())
+			{
+				ignoredNpcs.add(name);
+			}
+		}
+	}
+
+	private boolean isIgnored(String name)
+	{
+		return name != null && ignoredNpcs.contains(name.toLowerCase());
+	}
+
+	/** Toggle an NPC name on the ignore list, persist it, and drop any reel currently rolling for it. */
+	private void setIgnored(String name, boolean ignore)
+	{
+		if (ignore)
+		{
+			ignoredNpcs.add(name.toLowerCase());
+			activeRolls.removeIf(r -> name.equalsIgnoreCase(r.getMonster()));
+		}
+		else
+		{
+			ignoredNpcs.remove(name.toLowerCase());
+		}
+		configManager.setConfiguration(CONFIG_GROUP, "ignoredNpcs", String.join(",", ignoredNpcs));
+		log.debug("{} '{}' (ignore list now {})", ignore ? "ignored" : "unignored", name, ignoredNpcs);
 	}
 
 	@Subscribe
@@ -239,6 +307,7 @@ public class LoulettePlugin extends Plugin
 			startSpin(npc, now);
 		}
 
+
 		// Keep a still-spinning reel alive while the player keeps interacting with its creature (long harvests).
 		final int interactingIndex = me != null && me.getInteracting() instanceof NPC
 			? ((NPC) me.getInteracting()).getIndex()
@@ -253,10 +322,12 @@ public class LoulettePlugin extends Plugin
 			{
 				return false;
 			}
-			// A chest anticipation reel lingers until the chest is opened or 2x the result-hold time passes.
+			// A chest anticipation reel lingers until the chest is opened or 2x the result-hold time passes; a
+			// persistent (Olm-kill) one spins until the loot lands, capped by a long safety timeout.
 			if (roll.isAnticipation())
 			{
-				return now > roll.getSpinStartMs() + 2L * config.resultHoldMs();
+				final long ttl = roll.isPersistent() ? PERSISTENT_ANTICIPATION_MS : 2L * config.resultHoldMs();
+				return now > roll.getSpinStartMs() + ttl;
 			}
 			return now > roll.getSpinStartMs() + PRESPIN_TIMEOUT_MS && roll.getNpcIndex() != interactingIndex;
 		});
@@ -267,6 +338,38 @@ public class LoulettePlugin extends Plugin
 	public void onNpcDespawned(NpcDespawned event)
 	{
 		handledDeaths.remove(event.getNpc().getIndex());
+	}
+
+	/** When the ignore toggle is on, add a Lootlette-ignore / -unignore option to NPC right-click menus. */
+	@Subscribe
+	public void onMenuOpened(MenuOpened event)
+	{
+		if (!config.rightClickIgnore())
+		{
+			return;
+		}
+		NPC npc = null;
+		String target = null;
+		for (MenuEntry entry : event.getMenuEntries())
+		{
+			if (entry.getNpc() != null && entry.getNpc().getName() != null)
+			{
+				npc = entry.getNpc();
+				target = entry.getTarget();
+				break;
+			}
+		}
+		if (npc == null)
+		{
+			return;
+		}
+		final String name = npc.getName();
+		final boolean ignored = isIgnored(name);
+		client.createMenuEntry(1)
+			.setOption(ignored ? "Lootlette-unignore" : "Lootlette-ignore")
+			.setTarget(target)
+			.setType(MenuAction.RUNELITE)
+			.onClick(e -> setIgnored(name, !ignored));
 	}
 
 	/** Clicking an NPC resolves its drop table ahead of time, so its pool and rarity colours are ready when it dies. */
@@ -288,18 +391,39 @@ public class LoulettePlugin extends Plugin
 	private void startSpin(NPC npc, long now)
 	{
 		final String monster = npc.getName();
+		if (isIgnored(monster))
+		{
+			log.debug("skip spin '{}' (ignored)", monster);
+			return;
+		}
+		// Chambers of Xeric: the Great Olm head dying is the kill. Start a persistent full-table reel here that
+		// spins (top-centre) through the walk to the reward room and lands when the Ancient chest loot resolves.
+		if ("Great Olm".equals(monster))
+		{
+			final RaidChest cox = raidByEventName("Chambers of Xeric");
+			if (cox != null && !hasRollFor(cox.page))
+			{
+				log.debug("Great Olm HEAD died -> start CoX full-pool anticipation");
+				coxNarrow = 0;
+				startChestAnticipation(cox, npc.getWorldLocation(), true, true, true);
+			}
+			return;
+		}
+		// Inside Chambers of Xeric every room creature's loot is delivered by the Ancient chest, not the corpse, so
+		// rolling per-kill either lands on the wrong (wiki) table or never lands at all (no loot event). Suppress
+		// everything in here; only the Olm head (handled above) drives the chest anticipation.
+		if (client.getVarbitValue(Varbits.IN_RAID) > 0)
+		{
+			log.debug("skip spin '{}' (inside CoX; loot comes from the chest)", monster);
+			return;
+		}
 		if (isRaidChestBoss(monster))
 		{
 			log.debug("skip spin '{}' (raid boss; loot comes from the chest)", monster);
 			return;
 		}
-		// Multi-phase bosses empty their HP bar between phases; don't pre-spin on that. The real kill still
-		// rolls via the loot event.
-		if (MULTI_PHASE_BOSSES.contains(monster.toLowerCase()))
-		{
-			log.debug("skip spin '{}' (multi-phase boss; rolling on loot only)", monster);
-			return;
-		}
+		// Multi-phase bosses only reach here on the real death (isDying gates them to isDead), so no special-case
+		// is needed — fall through and pre-spin like any other kill.
 		if (!hasDropTable(monster))
 		{
 			log.debug("skip spin '{}' (no drop table)", monster);
@@ -373,6 +497,14 @@ public class LoulettePlugin extends Plugin
 
 	private boolean isDying(NPC npc)
 	{
+		// Multi-phase bosses (Nightmare, Verzik, KQ…) drop their HP bar to zero mid-fight — e.g. breaking the
+		// Nightmare's shield reads as healthRatio==0 without a death. Count only the real death animation for
+		// those, so a phase/shield break neither pre-spins a reel nor burns the one-shot death slot.
+		final String name = npc.getName();
+		if (name != null && MULTI_PHASE_BOSSES.contains(name.toLowerCase()))
+		{
+			return npc.isDead();
+		}
 		return npc.isDead() || (npc.getHealthScale() > 0 && npc.getHealthRatio() == 0);
 	}
 
@@ -380,7 +512,7 @@ public class LoulettePlugin extends Plugin
 	public void onNpcLootReceived(NpcLootReceived event)
 	{
 		final NPC npc = event.getNpc();
-		if (npc == null || npc.getName() == null || isRaidChestBoss(npc.getName()))
+		if (npc == null || npc.getName() == null || isRaidChestBoss(npc.getName()) || isIgnored(npc.getName()))
 		{
 			return;
 		}
@@ -413,7 +545,8 @@ public class LoulettePlugin extends Plugin
 		final String name = Text.removeTags(comp.getName());
 		final Collection<ItemStack> items = event.getItems();
 		log.debug("onServerNpcLoot '{}' id={} items={}", name, comp.getId(), items == null ? -1 : items.size());
-		if (name.isEmpty() || "null".equals(name) || items == null || items.isEmpty() || isRaidChestBoss(name))
+		if (name.isEmpty() || "null".equals(name) || items == null || items.isEmpty()
+			|| isRaidChestBoss(name) || isIgnored(name))
 		{
 			return;
 		}
@@ -501,9 +634,9 @@ public class LoulettePlugin extends Plugin
 		final GameObject obj = event.getGameObject();
 		final ObjectComposition def = client.getObjectDefinition(obj.getId());
 		final String name = def != null ? def.getName() : null;
-		// Debug aid: surface reward-room chest object ids/names so the matching set can be verified/extended.
-		if (name != null && !"null".equals(name)
-			&& (name.toLowerCase().contains("chest") || name.toLowerCase().contains("sarcophagus")))
+		// Debug aid: surface reward chest / loot-hole object ids/names so the matching set can be verified/extended.
+		if (name != null && !"null".equals(name) && matchesAny(name.toLowerCase(),
+			"chest", "sarcophagus", "hole", "burrow", "mokhaiotl", "doom", "remains"))
 		{
 			log.debug("object spawned id={} name='{}'", obj.getId(), name);
 		}
@@ -512,8 +645,13 @@ public class LoulettePlugin extends Plugin
 		{
 			return;
 		}
-		startChestAnticipation(raid, obj.getWorldLocation());
+		// Doom's golden hole only spawns when a unique rolled, so spin the uniques pool on a short timeout. The
+		// reward chests (ToB/ToA) can take 15s+ to walk to and open, so spin the FULL table persistently until the
+		// player's own loot lands (a teammate opening theirs no longer times it out), anchored vertically.
+		final boolean doom = "Doom of Mokhaiotl".equals(raid.page);
+		startChestAnticipation(raid, obj.getWorldLocation(), false, !doom, !doom);
 	}
+
 
 	/**
 	 * Raids reward chests don't fire NpcLootReceived and have no dying NPC, so roll straight off the chest loot.
@@ -548,38 +686,174 @@ public class LoulettePlugin extends Plugin
 			}
 		}
 
-		// Reuse the still-spinning anticipation reel so it lands in place; else anchor a fresh one.
+		if (log.isDebugEnabled())
+		{
+			final StringBuilder sb = new StringBuilder();
+			for (ItemStack s : loot)
+			{
+				sb.append(itemManager.getItemComposition(s.getId()).getName())
+					.append(" x").append(s.getQuantity()).append("; ");
+			}
+			log.debug("LootReceived '{}' purple={} items=[{}]", raid.page, purple, sb);
+		}
+
+		// Reuse the still-spinning anticipation reel so it lands in place; else anchor a fresh one. Either way,
+		// re-anchor onto the player's own tile: opening your chest means you're standing at it, so the landed
+		// vertical slot settles on YOUR chest rather than the first party chest that happened to spawn the reel.
+		final Player me = client.getLocalPlayer();
+		final WorldPoint mine = me != null ? me.getWorldLocation() : null;
 		ActiveRoll roll = findUnfinalisedRollByName(raid.page);
 		if (roll == null)
 		{
-			final Player me = client.getLocalPlayer();
-			roll = new ActiveRoll(-1, me != null ? me.getWorldLocation() : null,
-				System.currentTimeMillis(), raid.page);
+			// No surviving anticipation reel: anchor a fresh one. CoX renders on the top strip; every other chest
+			// is pinned vertical over the player's own chest tile.
+			final boolean cox = "Chambers of Xeric".equals(raid.page);
+			roll = new ActiveRoll(-1, mine, System.currentTimeMillis(), raid.page);
+			roll.setForceHorizontal(cox);
+			roll.setForceVertical(!cox);
 			activeRolls.add(roll);
+		}
+		else if (mine != null)
+		{
+			roll.setLocation(mine);
 		}
 		finaliseChestRoll(raid, roll, loot, purple);
 	}
 
-	/** Builds a free-spinning reel over the reward-room chest, cycling the raid's unique ("purple") table. */
+	/**
+	 * CoX early switch: after Olm's head dies the chest loot is announced as "Valuable drop:" game messages ~3s
+	 * before the chest loot event. Flag whether any names a unique (purple) and remember the tick, so the spinning
+	 * reel can be narrowed one tick later (after the whole burst is in) — see onGameTick.
+	 */
+	@Subscribe
+	public void onChatMessage(ChatMessage event)
+	{
+		final String msg = Text.removeTags(event.getMessage());
+		if (msg == null || msg.isEmpty())
+		{
+			return;
+		}
+		if (log.isDebugEnabled())
+		{
+			log.debug("chat[{}]: '{}'", event.getType(), msg);
+		}
+
+		if (coxNarrow == 2 || !msg.startsWith("Valuable drop:"))
+		{
+			return;
+		}
+		final RaidChest raid = raidByEventName("Chambers of Xeric");
+		if (raid == null)
+		{
+			return;
+		}
+		final ActiveRoll cox = findUnfinalisedRollByName(raid.page);
+		if (cox == null)
+		{
+			return;
+		}
+		final String lower = msg.toLowerCase();
+		boolean unique = false;
+		for (String uname : raid.uniqueNames)
+		{
+			if (lower.contains(uname))
+			{
+				unique = true;
+				break;
+			}
+		}
+		// Narrow immediately. A unique line upgrades a prior supply-narrow to uniques (purple); supplies only
+		// narrow if we're still on the full pool, so a purple is never downgraded to white by a later supply line.
+		if (unique)
+		{
+			switchAnticipationPool(cox, true);
+			coxNarrow = 2;
+		}
+		else if (coxNarrow == 0)
+		{
+			switchAnticipationPool(cox, false);
+			coxNarrow = 1;
+		}
+	}
+
+	/** Builds a free-spinning reel cycling the raid's unique ("purple") table, anchored over the reward chest. */
 	private void startChestAnticipation(RaidChest raid, WorldPoint loc)
+	{
+		startChestAnticipation(raid, loc, false, false, false);
+	}
+
+	/**
+	 * CoX: once the "Valuable drop:" lines reveal purple-vs-white, swap the still-spinning full-pool reel to
+	 * uniques-only (purple) or supplies-only (white) in place, keeping it spinning. It lands later on the real loot.
+	 */
+	private void switchAnticipationPool(ActiveRoll roll, boolean purple)
+	{
+		final RaidChest raid = raidByEventName("Chambers of Xeric");
+		if (raid == null || roll.getReels().isEmpty())
+		{
+			return;
+		}
+		final List<DropEntry> entries = dropTableService.table(raid.page).getNow(Collections.emptyList());
+		final ResolvedTable table = entries.isEmpty() ? tableCache.get(raid.page.toLowerCase()) : resolveTable(raid.page, entries);
+		final Set<Integer> uniqueIds = resolveUniqueIds(raid);
+
+		final List<Integer> symbols = new ArrayList<>();
+		if (purple)
+		{
+			symbols.addAll(uniqueIds);
+		}
+		else if (table != null)
+		{
+			for (int id : table.getPool())
+			{
+				if (!uniqueIds.contains(id))
+				{
+					symbols.add(id);
+				}
+			}
+		}
+		symbols.add(NOTHING_ID);
+		padTo(symbols, MIN_POOL);
+		Collections.shuffle(symbols, random);
+
+		final SlotReel old = roll.getReels().get(0);
+		roll.getReels().set(0, new SlotReel(symbols, old.getSpinStartMs(), config.spinSpeed()));
+		log.debug("CoX early switch -> {} pool ({} symbols)", purple ? "uniques-only" : "regular-only", symbols.size());
+	}
+
+	/**
+	 * @param forceHorizontal render the reel on the top-centre strip rather than over a world tile (CoX, where the
+	 *                        kill happens far from the chest).
+	 * @param persistent      keep spinning until the loot lands instead of timing out after 2x the hold (CoX).
+	 * @param fullPool        spin the whole drop table rather than just the uniques (CoX, so a white chest isn't
+	 *                        misleadingly cycling purples for the long Olm-kill-to-chest wait).
+	 */
+	private void startChestAnticipation(RaidChest raid, WorldPoint loc, boolean forceHorizontal, boolean persistent,
+		boolean fullPool)
 	{
 		final List<DropEntry> entries = dropTableService.table(raid.page).getNow(Collections.emptyList());
 		final ResolvedTable table = entries.isEmpty() ? tableCache.get(raid.page.toLowerCase()) : resolveTable(raid.page, entries);
 
 		final ActiveRoll roll = new ActiveRoll(-1, loc, System.currentTimeMillis(), raid.page);
 		roll.setAnticipation(true);
+		roll.setForceHorizontal(forceHorizontal);
+		// A reel anchored to the chest/hole tile (everything except CoX's top-strip reel) is pinned vertical so it
+		// stays over the object regardless of the global horizontal display toggle.
+		roll.setForceVertical(!forceHorizontal);
+		roll.setPersistent(persistent);
 		if (table != null)
 		{
 			roll.setPalette(table.getPalette());
 		}
 		activeRolls.add(roll);
 
-		final List<Integer> symbols = new ArrayList<>(resolveUniqueIds(raid));
+		final List<Integer> symbols = new ArrayList<>(
+			fullPool && table != null ? table.getPool() : resolveUniqueIds(raid));
 		symbols.add(NOTHING_ID);
 		padTo(symbols, MIN_POOL);
 		Collections.shuffle(symbols, random);
 		roll.getReels().add(new SlotReel(symbols, roll.getSpinStartMs(), config.spinSpeed()));
-		log.debug("chest anticipation '{}' (entered reward room)", raid.page);
+		log.debug("chest anticipation '{}' (fullPool={})", raid.page, fullPool);
 	}
 
 	/** Lands a chest reel: purples roll only the unique pool, whites roll only the supply pool. */
@@ -654,6 +928,18 @@ public class LoulettePlugin extends Plugin
 		}
 		roll.setReels(reels);
 		log.debug("finalise chest '{}' purple={} rolls={} hits={}", raid.page, purple, rolls, hits.size());
+	}
+
+	private static boolean matchesAny(String haystack, String... needles)
+	{
+		for (String n : needles)
+		{
+			if (haystack.contains(n))
+			{
+				return true;
+			}
+		}
+		return false;
 	}
 
 	/** True for raid room bosses whose loot is delivered by the raid chest, so they must not roll themselves. */

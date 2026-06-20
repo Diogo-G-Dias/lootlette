@@ -57,15 +57,18 @@ class LouletteOverlay extends Overlay
 	@Override
 	public Dimension render(Graphics2D g)
 	{
-		if (config.horizontalReel())
-		{
-			return null;
-		}
+		final boolean horizontalMode = config.horizontalReel();
 		final List<ActiveRoll> rolls = plugin.getActiveRolls();
 		final long now = System.currentTimeMillis();
 		for (ActiveRoll roll : rolls)
 		{
 			if (roll.isForceHorizontal())
+			{
+				continue;
+			}
+			// In global horizontal mode the top-centre overlay handles everything, except object-anchored chest
+			// reels (forceVertical) which must stay over their tile.
+			if (horizontalMode && !roll.isForceVertical())
 			{
 				continue;
 			}
