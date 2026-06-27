@@ -44,16 +44,27 @@ class LouletteOverlay extends Overlay
 	private final LoulettePlugin plugin;
 	private final LouletteConfig config;
 	private final ItemManager itemManager;
+	// When true this instance only draws object-anchored chest reels and renders above widgets, so the reel sits
+	// over reward-chest interfaces (TOB/ToA/Doom) instead of behind them. The default instance draws the rest on
+	// the scene layer.
+	private final boolean aboveWidgets;
 
 	@Inject
 	LouletteOverlay(Client client, LoulettePlugin plugin, LouletteConfig config, ItemManager itemManager)
+	{
+		this(client, plugin, config, itemManager, false);
+	}
+
+	LouletteOverlay(Client client, LoulettePlugin plugin, LouletteConfig config, ItemManager itemManager,
+		boolean aboveWidgets)
 	{
 		this.client = client;
 		this.plugin = plugin;
 		this.config = config;
 		this.itemManager = itemManager;
+		this.aboveWidgets = aboveWidgets;
 		setPosition(OverlayPosition.DYNAMIC);
-		setLayer(OverlayLayer.ABOVE_SCENE);
+		setLayer(aboveWidgets ? OverlayLayer.ABOVE_WIDGETS : OverlayLayer.ABOVE_SCENE);
 	}
 
 	@Override
@@ -68,11 +79,27 @@ class LouletteOverlay extends Overlay
 			{
 				continue;
 			}
-			// In global horizontal mode the top-centre overlay handles everything, except object-anchored chest
-			// reels (forceVertical) which must stay over their tile.
-			if (horizontalMode && !roll.isForceVertical())
+			if (aboveWidgets)
 			{
-				continue;
+				// This (above-widgets) instance only draws object-anchored chest reels, so they render over the
+				// reward-chest interface rather than behind it.
+				if (!roll.isForceVertical())
+				{
+					continue;
+				}
+			}
+			else
+			{
+				// Object-anchored chest reels are handled by the above-widgets instance.
+				if (roll.isForceVertical())
+				{
+					continue;
+				}
+				// In global horizontal mode the top-centre overlay handles the remaining (non-chest) reels.
+				if (horizontalMode)
+				{
+					continue;
+				}
 			}
 			drawCluster(g, roll, now);
 		}

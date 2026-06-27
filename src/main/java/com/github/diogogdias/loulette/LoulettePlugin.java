@@ -183,6 +183,10 @@ public class LoulettePlugin extends Plugin
 	@Inject
 	private LouletteOverlay overlay;
 
+	// Second instance of the vertical overlay, registered above widgets, so object-anchored chest reels draw over
+	// reward-chest interfaces (e.g. the TOB chest) instead of behind them.
+	private LouletteOverlay chestOverlay;
+
 	@Inject
 	private LouletteReelOverlay reelOverlay;
 
@@ -222,7 +226,9 @@ public class LoulettePlugin extends Plugin
 	@Override
 	protected void startUp()
 	{
+		chestOverlay = new LouletteOverlay(client, this, config, itemManager, true);
 		overlayManager.add(overlay);
+		overlayManager.add(chestOverlay);
 		overlayManager.add(reelOverlay);
 		loadIgnoredNpcs();
 		log.debug("Lootlette started");
@@ -232,6 +238,7 @@ public class LoulettePlugin extends Plugin
 	protected void shutDown()
 	{
 		overlayManager.remove(overlay);
+		overlayManager.remove(chestOverlay);
 		overlayManager.remove(reelOverlay);
 		activeRolls.clear();
 		seenDrops.clear();
@@ -320,11 +327,21 @@ public class LoulettePlugin extends Plugin
 		// Start the spin the instant one of our targets' HP hits zero.
 		for (NPC npc : client.getNpcs())
 		{
-			if (npc == null || npc.getName() == null || !isDying(npc))
+			if (npc == null || npc.getName() == null)
 			{
 				continue;
 			}
 			final int index = npc.getIndex();
+			if (!isDying(npc))
+			{
+				// Re-arm a reused index: an instanced/respawning boss (e.g. Phosani's Nightmare) that's alive again
+				// must roll on its next death, even if its corpse never fired a despawn between kills in the instance.
+				if (handledDeaths.remove(index))
+				{
+					log.debug("re-armed death-spin for '{}' idx={} (alive again)", npc.getName(), index);
+				}
+				continue;
+			}
 			if (handledDeaths.contains(index) || !isEngaged(index, now))
 			{
 				continue;
