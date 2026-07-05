@@ -2,7 +2,8 @@
 
 A RuneLite plugin that turns every drop into a slot machine. The moment a monster dies — or a Sailing
 creature is harvested — a reel spins over the spot and lands on what you actually got: one reel per loot
-roll, including the rolls that land on **Nothing**, each cell tinted by the item's drop rarity.
+roll, including the rolls that land on **Nothing**, each cell tinted by the item's drop rarity. Monsters
+with a pet even get their own **dedicated pet reel**, so there's a slot spinning for the pet on every kill.
 
 ## How it works
 
@@ -16,6 +17,8 @@ roll, including the rolls that land on **Nothing**, each cell tinted by the item
 - It shows **one reel per drop-table roll**. The roll count comes from the drop table (the main table's
   roll count; usually 1, more for multi-roll bosses), bumped up if you received more items than that.
   Your drops fill reels; leftover rolls land on a grey **Nothing** symbol.
+- **Pets get their own roll.** A pet is rolled separately from the main table in-game, so any monster with
+  a pet spins an extra dedicated reel that lands on the pet if you got it and on **Nothing** if you didn't.
 - **Always-drops are ignored** — guaranteed drops (bones, ashes, etc., rarity `Always`) don't take a
   reel and aren't counted as a roll.
 - Each cell is tinted by the item's **drop rarity** (see below); the reel pool of "possible items" is the
@@ -33,13 +36,15 @@ roll, including the rolls that land on **Nothing**, each cell tinted by the item
 Drop tables ship **bundled** with the plugin (`drops.json.gz`, a trimmed snapshot of the entire OSRS Wiki
 `dropsline` bucket — ~2,000 monsters, ~210 KB gzipped). That means full reels — every possible drop, roll
 counts, always-drop filtering, rarity colours and `Nothing` results — work out of the box with **no
-network request**. The snapshot also flags shared rare/gem/mega drop-table rows (see *Hide rare drop
-table*) and bundles an in-game id for every dropped item, so untradeable drops (pets, clue scrolls, boss
-uniques) render in the reel even though RuneLite's item search only knows GE-tradeable items.
+network request**. The snapshot also flags shared rare/gem/mega drop-table rows (see _Hide rare drop
+table_), flags which drops are **pets** (so they roll on their own reel), and bundles an in-game id for
+every dropped item, so untradeable drops (pets, clue scrolls, boss uniques) render in the reel even though
+RuneLite's item search only knows GE-tradeable items.
 
 Regenerate the snapshot from the wiki any time with `node scripts/scrape-drops.mjs`, then commit the
 updated `drops.json.gz`. Re-run it when the game adds new content. To re-apply just the rare-drop-table
-flags and item-id map to the existing snapshot without a full re-scrape, run `node scripts/enrich.mjs`.
+flags, pet flags and item-id map to the existing snapshot without a full re-scrape, run
+`node scripts/enrich.mjs`.
 
 For monsters **not** in the snapshot, turn on **Live wiki fallback** to fetch their table from the OSRS
 Wiki on demand (off by default — it sends your IP to a third-party server). With both the snapshot miss
@@ -48,30 +53,30 @@ counts, always-drop filtering, rarity colours or Nothing results).
 
 ## Config
 
-| Setting | Default | Notes |
-|---|---|---|
-| Settle time (ms) | 800 | How quickly the reels settle on the result once the loot resolves. |
-| Spin speed | 14 | How fast the reels spin while free-spinning (items per second). |
-| Result hold time (ms) | 2500 | How long the landed result stays on screen before it fades. |
-| Slot size (%) | 100 | Scales the reel slots and the item icons (50–250%). |
-| Horizontal reel (top centre) | off | Single CS:GO-style strip at the top centre instead of reels over the tile. |
-| Max reels per kill | 8 | Cap on how many reels (rolls) are shown at once (1–12). |
-| Min item value (gp) | 0 | Drops below this value roll to 'Nothing'. 0 = count everything. |
-| Hide rare drop table | on | Leaves the shared rare/gem/mega drop table (uncut gems, half keys, deep rune/dragon drops) out of the reel so a monster's own drops and uniques stand out. Items you actually receive still land. |
-| Live wiki fallback | off | Fetch tables live from the wiki for monsters missing from the bundled snapshot. Off by default because it sends your IP to a third-party server. |
+| Setting                      | Default | Notes                                                                                                                                                                                             |
+| ---------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Settle time (ms)             | 800     | How quickly the reels settle on the result once the loot resolves.                                                                                                                                |
+| Spin speed                   | 14      | How fast the reels spin while free-spinning (items per second).                                                                                                                                   |
+| Result hold time (ms)        | 2500    | How long the landed result stays on screen before it fades.                                                                                                                                       |
+| Slot size (%)                | 100     | Scales the reel slots and the item icons (50–250%).                                                                                                                                               |
+| Horizontal reel (top centre) | off     | Single CS:GO-style strip at the top centre instead of reels over the tile.                                                                                                                        |
+| Max reels per kill           | 8       | Cap on how many reels (rolls) are shown at once (1–12).                                                                                                                                           |
+| Min item value (gp)          | 0       | Drops below this value roll to 'Nothing'. 0 = count everything.                                                                                                                                   |
+| Hide rare drop table         | on      | Leaves the shared rare/gem/mega drop table (uncut gems, half keys, deep rune/dragon drops) out of the reel so a monster's own drops and uniques stand out. Items you actually receive still land. |
+| Live wiki fallback           | off     | Fetch tables live from the wiki for monsters missing from the bundled snapshot. Off by default because it sends your IP to a third-party server.                                                  |
 
 ### Rarity colours
 
 Each cell is coloured by the item's drop chance. All colours are configurable; defaults:
 
-| Grade | Drop chance | Default |
-|---|---|---|
-| Always | 100% | pale cyan |
-| Common | 1/25 or better | green |
-| Uncommon | 1/25 – 1/100 | yellow |
-| Rare | 1/100 – 1/1000 | orange |
-| Very rare | rarer than 1/1000 | red |
-| Varies / random | varies | pink |
+| Grade           | Drop chance       | Default   |
+| --------------- | ----------------- | --------- |
+| Always          | 100%              | pale cyan |
+| Common          | 1/25 or better    | green     |
+| Uncommon        | 1/25 – 1/100      | yellow    |
+| Rare            | 1/100 – 1/1000    | orange    |
+| Very rare       | rarer than 1/1000 | red       |
+| Varies / random | varies            | pink      |
 
 ## License
 
