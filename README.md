@@ -1,8 +1,9 @@
 # Lootlette
 
 A RuneLite plugin that turns every drop into a slot machine. The moment a monster dies — or a Sailing
-creature is harvested — a reel spins over the spot and lands on what you actually got: one reel per loot
-roll, including the rolls that land on **Nothing**, each cell tinted by the item's drop rarity.
+creature is harvested — a reel spins over the spot and lands on what you actually got: a single slot per
+kill that settles on your rarest drop (so a unique always beats a normal drop), or on **Nothing** when
+nothing notable dropped, each cell tinted by the item's drop rarity.
 
 ## How it works
 
@@ -13,9 +14,10 @@ roll, including the rolls that land on **Nothing**, each cell tinted by the item
   reel spins while you harvest (even at a distance) and lands on the yield.
 - **Raids reward chests:** Chambers of Xeric, Theatre of Blood and Tombs of Amascut roll off the chest
   loot (shown on the horizontal reel, since there's no tile to anchor to).
-- It shows **one reel per drop-table roll**. The roll count comes from the drop table (the main table's
-  roll count; usually 1, more for multi-roll bosses), bumped up if you received more items than that.
-  Your drops fill reels; leftover rolls land on a grey **Nothing** symbol.
+- **One slot per kill.** Each NPC kill shows a single reel that lands on the rarest item you received — a
+  unique always wins the slot over a normal drop. If nothing notable dropped, it lands on a grey
+  **Nothing** symbol. (Raids reward chests are the exception: a purple chest can show several reels, one
+  per unique.)
 - **Always-drops are ignored** — guaranteed drops (bones, ashes, etc., rarity `Always`) don't take a
   reel and aren't counted as a roll.
 - Each cell is tinted by the item's **drop rarity** (see below); the reel pool of "possible items" is the
@@ -55,7 +57,6 @@ counts, always-drop filtering, rarity colours or Nothing results).
 | Result hold time (ms) | 2500 | How long the landed result stays on screen before it fades. |
 | Slot size (%) | 100 | Scales the reel slots and the item icons (50–250%). |
 | Horizontal reel (top centre) | off | Single CS:GO-style strip at the top centre instead of reels over the tile. |
-| Max reels per kill | 8 | Cap on how many reels (rolls) are shown at once (1–12). |
 | Min item value (gp) | 0 | Drops below this value roll to 'Nothing'. 0 = count everything. |
 | Hide rare drop table | on | Leaves the shared rare/gem/mega drop table (uncut gems, half keys, deep rune/dragon drops) out of the reel so a monster's own drops and uniques stand out. Items you actually receive still land. |
 | Live wiki fallback | off | Fetch tables live from the wiki for monsters missing from the bundled snapshot. Off by default because it sends your IP to a third-party server. |

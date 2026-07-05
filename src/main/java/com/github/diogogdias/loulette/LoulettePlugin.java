@@ -22,6 +22,8 @@ import net.runelite.api.ChatMessageType;
 import net.runelite.api.Client;
 import net.runelite.api.GameObject;
 import net.runelite.api.GameState;
+import net.runelite.api.GraphicsObject;
+import net.runelite.api.GroundObject;
 import net.runelite.api.MenuAction;
 import net.runelite.api.MenuEntry;
 import net.runelite.api.NPC;
@@ -35,6 +37,8 @@ import net.runelite.api.events.ChatMessage;
 import net.runelite.api.events.GameObjectSpawned;
 import net.runelite.api.events.GameStateChanged;
 import net.runelite.api.events.GameTick;
+import net.runelite.api.events.GraphicsObjectCreated;
+import net.runelite.api.events.GroundObjectSpawned;
 import net.runelite.api.events.MenuOpened;
 import net.runelite.api.events.MenuOptionClicked;
 import net.runelite.api.events.NpcDespawned;
@@ -163,7 +167,7 @@ public class LoulettePlugin extends Plugin
 	// How long a reel free-spins waiting for its loot before giving up. Harvests can take 10s+ to yield, so the
 	// spinner is also kept alive as long as the player keeps interacting with the creature (see onGameTick).
 	private static final long PRESPIN_TIMEOUT_MS = 15000;
-	// Fixed cap on how many reels (rolls) are shown for one kill.
+	// Cap on reels shown for one raid chest (a purple can drop several uniques). NPC kills always show a single slot.
 	private static final int MAX_REELS = 5;
 	private static final int MIN_POOL = 6;
 	private static final int MIN_LAND_LOOPS = 1;
@@ -677,6 +681,52 @@ public class LoulettePlugin extends Plugin
 		return nearest;
 	}
 
+	/**
+	 * True while any object-anchored reward-room anticipation reel is live (TOB / ToA / Doom — forceVertical) —
+	 * scopes the reward-room diagnostics below so we capture the player-chest marker (TOB arrow, ToA key, ...).
+	 */
+	private boolean rewardRoomDiagActive()
+	{
+		for (ActiveRoll roll : activeRolls)
+		{
+			if (!roll.isFinalised() && roll.isAnticipation() && roll.isForceVertical())
+			{
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/** Resolves an object's impostor (owner/state variant) id, or -1 if it has none or isn't ready (ToA NPEs early). */
+	private static int safeImpostorId(ObjectComposition def)
+	{
+		if (def == null)
+		{
+			return -1;
+		}
+		try
+		{
+			final ObjectComposition imp = def.getImpostor();
+			return imp != null ? imp.getId() : -1;
+		}
+		catch (RuntimeException ex)
+		{
+			return -1;
+		}
+	}
+
+	/** Snapshot of the ToA per-seat varbits (and the purple varbit), to correlate a chest with its owner. */
+	private String toaSeatVarbitDump()
+	{
+		final StringBuilder sb = new StringBuilder();
+		sb.append("purple=").append(client.getVarbitValue(TOA_VARBIT_SARCOPHAGUS_PURPLE));
+		for (int vb : TOA_VARBIT_CHEST_SEATS)
+		{
+			sb.append(' ').append(vb).append('=').append(client.getVarbitValue(vb));
+		}
+		return sb.toString();
+	}
+
 	/** Entering a raid's reward room: spawn an anticipation reel on the chest, free-spinning its unique table. */
 	@Subscribe
 	public void onGameObjectSpawned(GameObjectSpawned event)
@@ -684,11 +734,20 @@ public class LoulettePlugin extends Plugin
 		final GameObject obj = event.getGameObject();
 		final ObjectComposition def = client.getObjectDefinition(obj.getId());
 		final String name = def != null ? def.getName() : null;
-		// Debug aid: surface reward chest / loot-hole object ids/names so the matching set can be verified/extended.
+		// Debug aid: surface reward chest / loot-hole object ids/names/locations so the matching set can be verified.
 		if (name != null && !"null".equals(name) && matchesAny(name.toLowerCase(),
 			"chest", "sarcophagus", "hole", "burrow", "mokhaiotl", "doom", "remains"))
 		{
-			log.debug("object spawned id={} name='{}'", obj.getId(), name);
+			log.debug("object spawned id={} name='{}' loc={}", obj.getId(), name, obj.getWorldLocation());
+		}
+		// Reward-room diagnostics: while a chest anticipation reel is live, log EVERY game object near the player
+		// (not just chests), with a SAFE impostor probe — TOB marks the player's chest via getImpostor() (32992/3),
+		// and ToA likely does too; the probe is wrapped because ToA's impostor varbit NPEs if read too early.
+		if (rewardRoomDiagActive())
+		{
+			log.debug("reward gameobj id={} impostor={} name='{}' loc={} actions={}", obj.getId(),
+				safeImpostorId(def), name, obj.getWorldLocation(),
+				def != null ? Arrays.toString(def.getActions()) : "null");
 		}
 		// Theatre of Blood: resolve the per-seat multiloc to its owner+rarity impostor; only the local player's
 		// own chest (32992/32993) anchors a reel — teammates' chests (32990/32991) are skipped.
@@ -723,6 +782,35 @@ public class LoulettePlugin extends Plugin
 			return;
 		}
 		startChestAnticipation(raid, obj.getWorldLocation(), false, false, false);
+	}
+
+	/** Reward-room diagnostics: ground objects (the player-chest marker may be a ground decoration). */
+	@Subscribe
+	public void onGroundObjectSpawned(GroundObjectSpawned event)
+	{
+		if (!rewardRoomDiagActive())
+		{
+			return;
+		}
+		final GroundObject obj = event.getGroundObject();
+		final ObjectComposition def = client.getObjectDefinition(obj.getId());
+		log.debug("reward groundobj id={} name='{}' loc={}", obj.getId(),
+			def != null ? def.getName() : null, obj.getWorldLocation());
+	}
+
+	/** Reward-room diagnostics: graphics objects (the TOB arrow / ToA key marker is most likely a SpotAnim here). */
+	@Subscribe
+	public void onGraphicsObjectCreated(GraphicsObjectCreated event)
+	{
+		if (!rewardRoomDiagActive())
+		{
+			return;
+		}
+		final GraphicsObject go = event.getGraphicsObject();
+		log.debug("reward gfxobj id={} loc={} player={} seatVarbits={}", go.getId(),
+			WorldPoint.fromLocalInstance(client, go.getLocation()),
+			client.getLocalPlayer() != null ? client.getLocalPlayer().getWorldLocation() : null,
+			toaSeatVarbitDump());
 	}
 
 	/**
@@ -1221,17 +1309,24 @@ public class LoulettePlugin extends Plugin
 			hits.add(s);
 			pool.add(s.getId());
 		}
-		hits.sort((a, b) -> Long.compare(value(b), value(a)));
+		// Only one slot is shown per NPC, so land it on the rarest hit: a unique always beats a normal drop.
+		// Rank by drop chance (rarer = smaller), unknown/varies rarity last, tie-broken by value.
+		final Map<Integer, Double> chances = haveWiki ? table.getIdChance() : Collections.emptyMap();
+		hits.sort((a, b) ->
+		{
+			final int r = Double.compare(rarityRank(chances.get(a.getId())), rarityRank(chances.get(b.getId())));
+			return r != 0 ? r : Long.compare(value(b), value(a));
+		});
 
 		final int mainRolls = haveWiki ? table.getMainRolls() : hits.size();
-		int rolls = Math.max(mainRolls, hits.size());
-		rolls = Math.min(rolls, MAX_REELS);
-
-		if (rolls <= 0)
+		if (Math.max(mainRolls, hits.size()) <= 0)
 		{
 			activeRolls.remove(roll);
 			return;
 		}
+		// Exactly one slot per NPC: the single reel lands on the rarest hit (a unique always wins, per the sort
+		// above), or on NOTHING when nothing qualifying dropped.
+		final int rolls = 1;
 
 		pool.add(NOTHING_ID);
 		final List<Integer> basePool = new ArrayList<>(pool);
@@ -1346,7 +1441,7 @@ public class LoulettePlugin extends Plugin
 
 		final boolean alwaysOnly = nonAlwaysNames.isEmpty();
 		final int mainRolls = alwaysOnly ? 0 : mode(rollCounts);
-		final ResolvedTable table = new ResolvedTable(pool, palette, alwaysIds, mainRolls, alwaysOnly);
+		final ResolvedTable table = new ResolvedTable(pool, palette, idChance, alwaysIds, mainRolls, alwaysOnly);
 		tableCache.put(monster.toLowerCase(), table);
 		return table;
 	}
@@ -1378,6 +1473,12 @@ public class LoulettePlugin extends Plugin
 			}
 		}
 		return null;
+	}
+
+	/** Sort key for "rarest first": a known chance ranks by its value (smaller = rarer); varies/unknown ranks last. */
+	private static double rarityRank(Double chance)
+	{
+		return chance != null && chance > 0 ? chance : Double.MAX_VALUE;
 	}
 
 	/** Combine two drop chances, preferring a known fraction over varies/unknown, then the rarer (smaller). */

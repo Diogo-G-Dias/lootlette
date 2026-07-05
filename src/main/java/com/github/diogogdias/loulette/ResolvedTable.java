@@ -12,15 +12,19 @@ class ResolvedTable
 {
 	private final List<Integer> pool;
 	private final Map<Integer, Color> palette;
+	/** Item id -> drop chance (1/128 = 0.0078); NaN = varies, <= 0 = unknown. Used to rank the rarest hit. */
+	private final Map<Integer, Double> idChance;
 	private final Set<Integer> alwaysIds;
 	private final int mainRolls;
 	/** True when every drop is guaranteed ("Always"): nothing is actually rolled, so no reel should spin. */
 	private final boolean alwaysOnly;
 
-	ResolvedTable(List<Integer> pool, Map<Integer, Color> palette, Set<Integer> alwaysIds, int mainRolls, boolean alwaysOnly)
+	ResolvedTable(List<Integer> pool, Map<Integer, Color> palette, Map<Integer, Double> idChance,
+		Set<Integer> alwaysIds, int mainRolls, boolean alwaysOnly)
 	{
 		this.pool = pool;
 		this.palette = palette;
+		this.idChance = idChance;
 		this.alwaysIds = alwaysIds;
 		this.mainRolls = mainRolls;
 		this.alwaysOnly = alwaysOnly;
