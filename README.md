@@ -18,6 +18,8 @@ nothing notable dropped, each cell tinted by the item's drop rarity.
   unique always wins the slot over a normal drop. If nothing notable dropped, it lands on a grey
   **Nothing** symbol. (Raids reward chests are the exception: a purple chest can show several reels, one
   per unique.)
+- **Pets get their own reel.** A pet is rolled separately from the main table in-game, so on a kill where
+  you actually receive one it spins an extra dedicated reel that lands on the pet.
 - **Always-drops are ignored** — guaranteed drops (bones, ashes, etc., rarity `Always`) don't take a
   reel and aren't counted as a roll.
 - Each cell is tinted by the item's **drop rarity** (see below); the reel pool of "possible items" is the

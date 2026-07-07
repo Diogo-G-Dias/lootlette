@@ -1290,9 +1290,18 @@ public class LoulettePlugin extends Plugin
 			pool.addAll(seenDrops.getOrDefault(roll.getMonster().toLowerCase(), Collections.emptySet()));
 		}
 
-		final List<ItemStack> hits = new ArrayList<>();
+		// A pet is rolled apart from the main table, so route a pet drop to its own dedicated reel (shown only when
+		// the pet actually drops) instead of letting it compete for a main-table reel slot.
+		final Set<Integer> petIds = haveWiki ? table.getPetIds() : Collections.<Integer>emptySet();
+		final List<ItemStack> mainHits = new ArrayList<>();
+		final List<ItemStack> petHits = new ArrayList<>();
 		for (ItemStack s : items)
 		{
+			if (petIds.contains(s.getId()))
+			{
+				petHits.add(s);
+				continue;
+			}
 			if (alwaysIds.contains(s.getId()))
 			{
 				continue;
@@ -1304,17 +1313,17 @@ public class LoulettePlugin extends Plugin
 			{
 				continue;
 			}
-			hits.add(s);
+			mainHits.add(s);
 			pool.add(s.getId());
 		}
-		// Rank hits so that when the "Max reels" cap trims reels the uniques are kept: uniques first (an item tagged
-		// in the monster's bundled "Uniques" set, or — as a fallback — one tinted the "very rare" rarity colour,
-		// the same signal as the cha-ching), then rarest-first by drop chance (unknown/varies last), then value.
+		// Rank main hits so that when the "Max reels" cap trims reels the uniques are kept: uniques first (an item
+		// tagged in the monster's bundled "Uniques" set, or — as a fallback — one tinted the "very rare" rarity
+		// colour, the same signal as the cha-ching), then rarest-first by drop chance (unknown/varies last), then value.
 		final Map<Integer, Double> chances = haveWiki ? table.getIdChance() : Collections.emptyMap();
 		final Set<Integer> uniqueIds = haveWiki ? table.getUniqueIds() : Collections.emptySet();
 		final Color veryRare = config.colourVeryRare();
 		final Map<Integer, Color> palette = roll.getPalette();
-		hits.sort((a, b) ->
+		mainHits.sort((a, b) ->
 		{
 			final boolean ua = isUnique(a.getId(), uniqueIds, veryRare, palette);
 			final boolean ub = isUnique(b.getId(), uniqueIds, veryRare, palette);
@@ -1326,49 +1335,65 @@ public class LoulettePlugin extends Plugin
 			return r != 0 ? r : Long.compare(value(b), value(a));
 		});
 
-		final int mainRolls = haveWiki ? table.getMainRolls() : hits.size();
-		if (Math.max(mainRolls, hits.size()) <= 0)
+		final int mainRolls = haveWiki ? table.getMainRolls() : mainHits.size();
+		if (Math.max(mainRolls, mainHits.size()) <= 0 && petHits.isEmpty())
 		{
 			activeRolls.remove(roll);
 			return;
 		}
-		// One slot per kill drawing up to "Max reels" reels, landing on the rarest hits (a unique always wins, per
-		// the sort above). With Max reels = 1 the slot shows a single reel on the rarest drop; leftover reels roll
-		// NOTHING.
-		final int rolls = Math.min(Math.max(mainRolls, hits.size()), config.maxReels());
+		// One slot per kill drawing up to "Max reels" reels. A dedicated pet reel is reserved first (the pet is the
+		// headline); the remaining budget draws the main table's rarest hits (a unique always wins), then NOTHING.
+		final int maxReels = config.maxReels();
+		final int petReelN = Math.min(petHits.size(), maxReels);
+		final int mainReelN = Math.min(Math.max(mainRolls, mainHits.size()), maxReels - petReelN);
 
 		pool.add(NOTHING_ID);
 		final List<Integer> basePool = new ArrayList<>(pool);
+		final List<Integer> petBase = new ArrayList<>(petIds);
+		petBase.add(NOTHING_ID);
 		final long now = System.currentTimeMillis();
 		final int settle = config.settleMs();
 		final List<SlotReel> reels = new ArrayList<>();
 
-		final int hitCount = Math.min(hits.size(), rolls);
-		for (int i = 0; i < hitCount; i++)
+		final int mainHitCount = Math.min(mainHits.size(), mainReelN);
+		for (int i = 0; i < mainHitCount; i++)
 		{
-			final ItemStack s = hits.get(i);
+			final ItemStack s = mainHits.get(i);
 			reels.add(buildReel(basePool, roll.getSpinStartMs(), now, s.getId(), s.getQuantity(), settle));
 		}
-		for (int i = hitCount; i < rolls; i++)
+		for (int i = mainHitCount; i < mainReelN; i++)
 		{
 			reels.add(buildReel(basePool, roll.getSpinStartMs(), now, NOTHING_ID, 1, settle));
 		}
+		// Dedicated pet reel(s), appended after the main reels — one per pet actually received.
+		for (int i = 0; i < petReelN; i++)
+		{
+			final ItemStack s = petHits.get(i);
+			reels.add(buildReel(petBase, roll.getSpinStartMs(), now, s.getId(), s.getQuantity(), settle));
+		}
 
 		roll.setReels(reels);
-		// Cha-ching if any landed hit is a unique — a tagged unique drop, or (fallback) a very rare (rarer than
-		// 1/1000) drop tinted that colour. Needs a resolved wiki palette; the seen-drops fallback has none.
-		if (haveWiki)
+		// Cha-ching for a pet, or any landed main hit that's a unique — a tagged unique drop, or (fallback) a very
+		// rare (rarer than 1/1000) drop tinted that colour. Rarity needs a resolved wiki palette; the seen-drops
+		// fallback has none, so on that path it only fires for pets.
+		boolean chaChing = !petHits.isEmpty();
+		if (!chaChing && haveWiki)
 		{
-			for (int i = 0; i < hitCount; i++)
+			for (int i = 0; i < mainHitCount; i++)
 			{
-				if (isUnique(hits.get(i).getId(), uniqueIds, veryRare, palette))
+				if (isUnique(mainHits.get(i).getId(), uniqueIds, veryRare, palette))
 				{
-					playUniqueSound();
+					chaChing = true;
 					break;
 				}
 			}
 		}
-		log.debug("finalise '{}' rolls={} hits={} (loot spawned)", roll.getMonster(), rolls, hits.size());
+		if (chaChing)
+		{
+			playUniqueSound();
+		}
+		log.debug("finalise '{}' mainReels={} petReels={} mainHits={} petHits={} (loot spawned)",
+			roll.getMonster(), mainReelN, petReelN, mainHits.size(), petHits.size());
 	}
 
 	private SlotReel buildReel(List<Integer> basePool, long spinStartMs, long now, int targetId, int quantity, int settle)
@@ -1398,11 +1423,19 @@ public class LoulettePlugin extends Plugin
 		final boolean hideRdt = config.hideRareDropTable();
 		final Set<String> nonAlwaysNames = new LinkedHashSet<>();
 		final Set<String> anyAlwaysNames = new HashSet<>();
+		// Pets are rolled on a separate roll from the main table, so they're kept out of the main pool and
+		// roll-count here and land on their own dedicated reel in finaliseRoll (only when the pet actually drops).
+		final Set<String> petNames = new LinkedHashSet<>();
 		final Map<Integer, Integer> rollCounts = new HashMap<>();
 		final Map<String, Double> nameChance = new HashMap<>();
 		for (DropEntry e : entries)
 		{
-			if (e.isAlways())
+			if (dropTableService.isPet(e.getName()))
+			{
+				petNames.add(e.getName());
+				nameChance.merge(e.getName(), e.getChance(), LoulettePlugin::rarer);
+			}
+			else if (e.isAlways())
 			{
 				anyAlwaysNames.add(e.getName());
 			}
@@ -1416,6 +1449,7 @@ public class LoulettePlugin extends Plugin
 			}
 		}
 		anyAlwaysNames.removeAll(nonAlwaysNames);
+		anyAlwaysNames.removeAll(petNames);
 
 		final Set<Integer> alwaysIds = new HashSet<>();
 		for (String name : anyAlwaysNames)
@@ -1447,6 +1481,20 @@ public class LoulettePlugin extends Plugin
 			palette.put(e.getKey(), Rarity.colour(e.getValue(), config));
 		}
 
+		// Pet ids stay out of the pool (their reel spins its own pool) but still feed the palette so the pet
+		// symbol lands with its rarity colour.
+		final Set<Integer> petIds = new LinkedHashSet<>();
+		for (String name : petNames)
+		{
+			final int id = resolveItemId(name);
+			if (id > 0)
+			{
+				petIds.add(id);
+				idChance.merge(id, nameChance.getOrDefault(name, -1.0), LoulettePlugin::rarer);
+				palette.put(id, Rarity.colour(idChance.get(id), config));
+			}
+		}
+
 		final Set<Integer> uniqueIds = new HashSet<>();
 		for (String name : dropTableService.uniqueNames(monster))
 		{
@@ -1457,9 +1505,11 @@ public class LoulettePlugin extends Plugin
 			}
 		}
 
-		final boolean alwaysOnly = nonAlwaysNames.isEmpty();
-		final int mainRolls = alwaysOnly ? 0 : mode(rollCounts);
-		final ResolvedTable table = new ResolvedTable(pool, palette, idChance, alwaysIds, uniqueIds, mainRolls, alwaysOnly);
+		// A pet-only non-always table still spins (its pet reel), so it isn't "always only"; but with no main
+		// non-always names the main table rolls nothing.
+		final boolean alwaysOnly = nonAlwaysNames.isEmpty() && petIds.isEmpty();
+		final int mainRolls = nonAlwaysNames.isEmpty() ? 0 : mode(rollCounts);
+		final ResolvedTable table = new ResolvedTable(pool, palette, idChance, alwaysIds, uniqueIds, petIds, mainRolls, alwaysOnly);
 		tableCache.put(monster.toLowerCase(), table);
 		return table;
 	}

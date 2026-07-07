@@ -11,6 +11,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { fetchCanonical, flagRareDropTable } from "./rdt-detect.mjs";
 import { fetchItemIdMap, itemIdsFor } from "./item-ids.mjs";
+import { fetchPets, petNamesFor } from "./pet-detect.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const OUT = resolve(here, "../src/main/resources/com/github/diogogdias/loulette/drops.json.gz");
@@ -25,6 +26,9 @@ process.stderr.write(`flagged ${flagged} rare/gem/mega drop-table rows\n`);
 const fullMap = await fetchItemIdMap();
 payload.items = itemIdsFor(payload.monsters, fullMap);
 process.stderr.write(`item ids: ${Object.keys(payload.items).length} mapped (of ${Object.keys(fullMap).length} known)\n`);
+
+payload.pets = petNamesFor(payload.monsters, await fetchPets());
+process.stderr.write(`pets: ${payload.pets.length} pet drop-rows flagged\n`);
 
 const raw = Buffer.from(JSON.stringify(payload));
 const gz = gzipSync(raw, { level: 9 });

@@ -8,10 +8,12 @@
 //   { "lastUpdated": "YYYY-MM-DD",
 //     "monsters": { "<page>": [ [name, rarity, rolls, rdt], ... ] },
 //     "items": { "<lower item name>": <item id> },
-//     "uniques": { "<page>": [ "<unique item name>", ... ] } }
+//     "uniques": { "<page>": [ "<unique item name>", ... ] },
+//     "pets": [ "<lower pet item name>", ... ] }
 // rolls is omitted (defaults to 1) when 1; rdt (a trailing 1 marking a rare/gem/mega drop-table
 // row) is omitted when absent. "Nothing"/empty rows are dropped. The items map carries an in-game id
-// for every dropped item (incl. untradeables that ItemManager.search can't resolve).
+// for every dropped item (incl. untradeables that ItemManager.search can't resolve). pets lists the
+// drop-row item names that are actually pets, which OSRS rolls on a separate roll from the main table.
 
 import { writeFileSync, mkdirSync } from "node:fs";
 import { gzipSync } from "node:zlib";
@@ -20,6 +22,7 @@ import { fileURLToPath } from "node:url";
 import { fetchCanonical, flagRareDropTable } from "./rdt-detect.mjs";
 import { fetchItemIdMap, itemIdsFor } from "./item-ids.mjs";
 import { scrapeUniques } from "./unique-drops.mjs";
+import { fetchPets, petNamesFor } from "./pet-detect.mjs";
 
 const API = "https://oldschool.runescape.wiki/api.php";
 const PAGE = 5000;
@@ -92,9 +95,12 @@ for (const names of Object.values(uniques)) {
 }
 process.stderr.write(`item ids: ${Object.keys(items).length} mapped\n`);
 
+const pets = petNamesFor(monsters, await fetchPets());
+process.stderr.write(`pets: ${pets.length} pet drop-rows flagged\n`);
+
 const now = new Date();
 const lastUpdated = now.toISOString().slice(0, 10);
-const payload = { lastUpdated, monsters, items, uniques };
+const payload = { lastUpdated, monsters, items, uniques, pets };
 const raw = Buffer.from(JSON.stringify(payload));
 const gz = gzipSync(raw, { level: 9 });
 

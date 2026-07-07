@@ -11,8 +11,10 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.zip.GZIPInputStream;
@@ -55,6 +57,9 @@ class DropTableService
 	/** Bundled lower-cased page name -> the monster's unique drop names (wiki "Uniques" section). */
 	private final Map<String, List<String>> uniqueNames;
 
+	/** Bundled pet item names (lower-cased): drops OSRS rolls on a separate roll from the main table. */
+	private final Set<String> pets;
+
 	private final Map<String, CompletableFuture<List<DropEntry>>> cache = new ConcurrentHashMap<>();
 
 	@Inject
@@ -67,6 +72,13 @@ class DropTableService
 		this.bundled = parseMonsters(root);
 		this.itemIds = parseItemIds(root);
 		this.uniqueNames = parseUniques(root);
+		this.pets = parsePets(root);
+	}
+
+	/** True when an item name is a pet (rolled on its own roll, so it earns a dedicated reel). */
+	boolean isPet(String name)
+	{
+		return name != null && pets.contains(name.toLowerCase());
 	}
 
 	/** Bundled in-game id for an item name, or -1 if it isn't in the snapshot. */
@@ -189,6 +201,22 @@ class DropTableService
 			out.put(e.getKey(), Collections.unmodifiableList(names));
 		}
 		return Collections.unmodifiableMap(out);
+	}
+
+	/** Bundled snapshot -> immutable set of lower-cased pet item names. */
+	private static Set<String> parsePets(JsonObject root)
+	{
+		if (root == null || !root.has("pets") || !root.get("pets").isJsonArray())
+		{
+			return Collections.emptySet();
+		}
+		final JsonArray arr = root.getAsJsonArray("pets");
+		final Set<String> out = new HashSet<>(arr.size() * 2);
+		for (int i = 0; i < arr.size(); i++)
+		{
+			out.add(arr.get(i).getAsString().toLowerCase());
+		}
+		return Collections.unmodifiableSet(out);
 	}
 
 	/**
