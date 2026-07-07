@@ -214,6 +214,21 @@ public interface LouletteConfig extends Config
 		return false;
 	}
 
+	@Range(min = 1, max = 10)
+	@ConfigItem(
+		keyName = "maxReels",
+		name = "Max reels",
+		description = "Maximum number of reels shown for a single kill or raid chest (bosses like the Nightmare and "
+			+ "raid purples can drop several items at once). Set to 1 to always show a single slot landing on the "
+			+ "rarest drop.",
+		section = advanced,
+		position = 8
+	)
+	default int maxReels()
+	{
+		return 5;
+	}
+
 	// ---- Rarity colours ----
 
 	@ConfigItem(

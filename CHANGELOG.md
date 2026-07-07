@@ -2,6 +2,24 @@
 
 All notable changes to Lootlette are documented here.
 
+## [1.0.7] - 2026-07-07
+
+### Added
+- **Max reels** setting (Advanced, default 5): the most reels shown for a single kill or raid chest. Set it
+  to 1 for a single slot that lands on the rarest/most unique drop.
+
+### Changed
+- A kill now shows **one slot with up to "Max reels" reels** (one per notable drop) instead of collapsing to
+  a single reel — bosses like the Nightmare that drop several items at once show them together again.
+- **Uniques are prioritised** when the reel cap trims: a monster's tagged uniques (and, as a fallback, any
+  very-rare drop tinted that colour) are always kept and trigger the "cha-ching" — even relatively common
+  uniques the rarity colour alone would miss, such as the Sarachnis cudgel.
+
+### Data
+- Bundled a `uniques` set scraped from the OSRS Wiki drop-table sections (51 monsters, 236 items), with a
+  manual supplement for bosses whose page has no "Uniques" heading (Vorkath, Alchemical Hydra, Sarachnis,
+  Scurrius, Obor, Bryophyta, Brutus).
+
 ## [1.0.6] - 2026-07-05
 
 ### Changed

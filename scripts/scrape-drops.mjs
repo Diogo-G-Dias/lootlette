@@ -7,7 +7,8 @@
 // Schema (keyed by lower-cased monster/page name):
 //   { "lastUpdated": "YYYY-MM-DD",
 //     "monsters": { "<page>": [ [name, rarity, rolls, rdt], ... ] },
-//     "items": { "<lower item name>": <item id> } }
+//     "items": { "<lower item name>": <item id> },
+//     "uniques": { "<page>": [ "<unique item name>", ... ] } }
 // rolls is omitted (defaults to 1) when 1; rdt (a trailing 1 marking a rare/gem/mega drop-table
 // row) is omitted when absent. "Nothing"/empty rows are dropped. The items map carries an in-game id
 // for every dropped item (incl. untradeables that ItemManager.search can't resolve).
@@ -18,6 +19,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { fetchCanonical, flagRareDropTable } from "./rdt-detect.mjs";
 import { fetchItemIdMap, itemIdsFor } from "./item-ids.mjs";
+import { scrapeUniques } from "./unique-drops.mjs";
 
 const API = "https://oldschool.runescape.wiki/api.php";
 const PAGE = 5000;
@@ -38,6 +40,7 @@ async function fetchPage(offset) {
 }
 
 const monsters = {};
+const titles = {}; // lower-cased page key -> original-case wiki title (for the wikitext scrape)
 let total = 0, kept = 0;
 
 for (let offset = 0; ; offset += PAGE) {
@@ -61,6 +64,7 @@ for (let offset = 0; ; offset += PAGE) {
     }
 
     const key = page.toLowerCase();
+    titles[key] ??= page;
     (monsters[key] ??= []).push(rolls === 1 ? [name, rarity] : [name, rarity, rolls]);
     kept++;
   }
@@ -73,12 +77,24 @@ const base = await fetchCanonical();
 const flagged = flagRareDropTable(monsters, base);
 process.stderr.write(`flagged ${flagged} rare/gem/mega drop-table rows (${Object.keys(base).length} canonical items)\n`);
 
-const items = itemIdsFor(monsters, await fetchItemIdMap());
+const fullMap = await fetchItemIdMap();
+
+// Uniques: scrape each page's ===Uniques=== drop section (filtered against the full item map so any
+// resolvable name survives), then bundle only those names' ids into `items` so the plugin can resolve them.
+const uniques = await scrapeUniques(Object.values(titles), fullMap, (m) => process.stderr.write(m));
+
+const items = itemIdsFor(monsters, fullMap);
+for (const names of Object.values(uniques)) {
+  for (const name of names) {
+    const key = name.toLowerCase();
+    if (!(key in items) && key in fullMap) items[key] = fullMap[key];
+  }
+}
 process.stderr.write(`item ids: ${Object.keys(items).length} mapped\n`);
 
 const now = new Date();
 const lastUpdated = now.toISOString().slice(0, 10);
-const payload = { lastUpdated, monsters, items };
+const payload = { lastUpdated, monsters, items, uniques };
 const raw = Buffer.from(JSON.stringify(payload));
 const gz = gzipSync(raw, { level: 9 });
 

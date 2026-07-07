@@ -52,6 +52,9 @@ class DropTableService
 	/** Bundled item name (lower-cased) -> in-game id, covering untradeables ItemManager.search can't. */
 	private final Map<String, Integer> itemIds;
 
+	/** Bundled lower-cased page name -> the monster's unique drop names (wiki "Uniques" section). */
+	private final Map<String, List<String>> uniqueNames;
+
 	private final Map<String, CompletableFuture<List<DropEntry>>> cache = new ConcurrentHashMap<>();
 
 	@Inject
@@ -63,6 +66,7 @@ class DropTableService
 		final JsonObject root = loadRoot(gson);
 		this.bundled = parseMonsters(root);
 		this.itemIds = parseItemIds(root);
+		this.uniqueNames = parseUniques(root);
 	}
 
 	/** Bundled in-game id for an item name, or -1 if it isn't in the snapshot. */
@@ -74,6 +78,16 @@ class DropTableService
 		}
 		final Integer id = itemIds.get(name.toLowerCase());
 		return id != null ? id : -1;
+	}
+
+	/** The monster's tagged unique drop names (wiki "Uniques" section), or empty if none are bundled. */
+	List<String> uniqueNames(String monster)
+	{
+		if (monster == null)
+		{
+			return Collections.emptyList();
+		}
+		return uniqueNames.getOrDefault(monster.toLowerCase(), Collections.emptyList());
 	}
 
 	CompletableFuture<List<DropEntry>> table(String monster)
@@ -143,6 +157,28 @@ class DropTableService
 		for (Map.Entry<String, JsonElement> e : items.entrySet())
 		{
 			out.put(e.getKey(), e.getValue().getAsInt());
+		}
+		return Collections.unmodifiableMap(out);
+	}
+
+	/** Bundled snapshot -> immutable lower-cased page name -> unique drop names map. */
+	private static Map<String, List<String>> parseUniques(JsonObject root)
+	{
+		if (root == null || !root.has("uniques") || !root.get("uniques").isJsonObject())
+		{
+			return Collections.emptyMap();
+		}
+		final JsonObject uniques = root.getAsJsonObject("uniques");
+		final Map<String, List<String>> out = new HashMap<>(uniques.size() * 2);
+		for (Map.Entry<String, JsonElement> e : uniques.entrySet())
+		{
+			final JsonArray arr = e.getValue().getAsJsonArray();
+			final List<String> names = new ArrayList<>(arr.size());
+			for (int i = 0; i < arr.size(); i++)
+			{
+				names.add(arr.get(i).getAsString());
+			}
+			out.put(e.getKey(), Collections.unmodifiableList(names));
 		}
 		return Collections.unmodifiableMap(out);
 	}

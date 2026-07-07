@@ -167,8 +167,6 @@ public class LoulettePlugin extends Plugin
 	// How long a reel free-spins waiting for its loot before giving up. Harvests can take 10s+ to yield, so the
 	// spinner is also kept alive as long as the player keeps interacting with the creature (see onGameTick).
 	private static final long PRESPIN_TIMEOUT_MS = 15000;
-	// Cap on reels shown for one raid chest (a purple can drop several uniques). NPC kills always show a single slot.
-	private static final int MAX_REELS = 5;
 	private static final int MIN_POOL = 6;
 	private static final int MIN_LAND_LOOPS = 1;
 
@@ -1113,7 +1111,7 @@ public class LoulettePlugin extends Plugin
 		}
 		hits.sort((a, b) -> Long.compare(value(b), value(a)));
 
-		int rolls = Math.min(Math.max(hits.size(), 1), MAX_REELS);
+		int rolls = Math.min(Math.max(hits.size(), 1), config.maxReels());
 		pool.add(NOTHING_ID);
 		final List<Integer> basePool = new ArrayList<>(pool);
 		final long now = System.currentTimeMillis();
@@ -1309,11 +1307,21 @@ public class LoulettePlugin extends Plugin
 			hits.add(s);
 			pool.add(s.getId());
 		}
-		// Only one slot is shown per NPC, so land it on the rarest hit: a unique always beats a normal drop.
-		// Rank by drop chance (rarer = smaller), unknown/varies rarity last, tie-broken by value.
+		// Rank hits so that when the "Max reels" cap trims reels the uniques are kept: uniques first (an item tagged
+		// in the monster's bundled "Uniques" set, or — as a fallback — one tinted the "very rare" rarity colour,
+		// the same signal as the cha-ching), then rarest-first by drop chance (unknown/varies last), then value.
 		final Map<Integer, Double> chances = haveWiki ? table.getIdChance() : Collections.emptyMap();
+		final Set<Integer> uniqueIds = haveWiki ? table.getUniqueIds() : Collections.emptySet();
+		final Color veryRare = config.colourVeryRare();
+		final Map<Integer, Color> palette = roll.getPalette();
 		hits.sort((a, b) ->
 		{
+			final boolean ua = isUnique(a.getId(), uniqueIds, veryRare, palette);
+			final boolean ub = isUnique(b.getId(), uniqueIds, veryRare, palette);
+			if (ua != ub)
+			{
+				return ua ? -1 : 1;
+			}
 			final int r = Double.compare(rarityRank(chances.get(a.getId())), rarityRank(chances.get(b.getId())));
 			return r != 0 ? r : Long.compare(value(b), value(a));
 		});
@@ -1324,9 +1332,10 @@ public class LoulettePlugin extends Plugin
 			activeRolls.remove(roll);
 			return;
 		}
-		// Exactly one slot per NPC: the single reel lands on the rarest hit (a unique always wins, per the sort
-		// above), or on NOTHING when nothing qualifying dropped.
-		final int rolls = 1;
+		// One slot per kill drawing up to "Max reels" reels, landing on the rarest hits (a unique always wins, per
+		// the sort above). With Max reels = 1 the slot shows a single reel on the rarest drop; leftover reels roll
+		// NOTHING.
+		final int rolls = Math.min(Math.max(mainRolls, hits.size()), config.maxReels());
 
 		pool.add(NOTHING_ID);
 		final List<Integer> basePool = new ArrayList<>(pool);
@@ -1346,14 +1355,13 @@ public class LoulettePlugin extends Plugin
 		}
 
 		roll.setReels(reels);
-		// Cha-ching if any landed hit is a very rare (rarer than 1/1000) drop — pets, boss uniques, etc. Needs a
-		// resolved wiki palette to know rarity; the seen-drops fallback has none, so it simply won't fire there.
+		// Cha-ching if any landed hit is a unique — a tagged unique drop, or (fallback) a very rare (rarer than
+		// 1/1000) drop tinted that colour. Needs a resolved wiki palette; the seen-drops fallback has none.
 		if (haveWiki)
 		{
-			final Color veryRare = config.colourVeryRare();
 			for (int i = 0; i < hitCount; i++)
 			{
-				if (veryRare.equals(roll.getPalette().get(hits.get(i).getId())))
+				if (isUnique(hits.get(i).getId(), uniqueIds, veryRare, palette))
 				{
 					playUniqueSound();
 					break;
@@ -1439,9 +1447,19 @@ public class LoulettePlugin extends Plugin
 			palette.put(e.getKey(), Rarity.colour(e.getValue(), config));
 		}
 
+		final Set<Integer> uniqueIds = new HashSet<>();
+		for (String name : dropTableService.uniqueNames(monster))
+		{
+			final int id = resolveItemId(name);
+			if (id > 0)
+			{
+				uniqueIds.add(id);
+			}
+		}
+
 		final boolean alwaysOnly = nonAlwaysNames.isEmpty();
 		final int mainRolls = alwaysOnly ? 0 : mode(rollCounts);
-		final ResolvedTable table = new ResolvedTable(pool, palette, idChance, alwaysIds, mainRolls, alwaysOnly);
+		final ResolvedTable table = new ResolvedTable(pool, palette, idChance, alwaysIds, uniqueIds, mainRolls, alwaysOnly);
 		tableCache.put(monster.toLowerCase(), table);
 		return table;
 	}
@@ -1479,6 +1497,12 @@ public class LoulettePlugin extends Plugin
 	private static double rarityRank(Double chance)
 	{
 		return chance != null && chance > 0 ? chance : Double.MAX_VALUE;
+	}
+
+	/** A "unique" drop: tagged in the monster's bundled unique set, or (fallback) tinted the "very rare" colour. */
+	private static boolean isUnique(int id, Set<Integer> uniqueIds, Color veryRare, Map<Integer, Color> palette)
+	{
+		return uniqueIds.contains(id) || veryRare.equals(palette.get(id));
 	}
 
 	/** Combine two drop chances, preferring a known fraction over varies/unknown, then the rarer (smaller). */
