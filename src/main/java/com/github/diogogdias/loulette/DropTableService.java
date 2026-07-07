@@ -87,13 +87,21 @@ class DropTableService
 		{
 			return Collections.emptyList();
 		}
-		return uniqueNames.getOrDefault(monster.toLowerCase(), Collections.emptyList());
+		final String key = monster.toLowerCase();
+		final List<String> names = uniqueNames.get(key);
+		if (names != null)
+		{
+			return names;
+		}
+		return uniqueNames.getOrDefault(key + " (monster)", Collections.emptyList());
 	}
 
 	CompletableFuture<List<DropEntry>> table(String monster)
 	{
 		final String key = monster.toLowerCase();
-		final List<DropEntry> snapshot = bundled.get(key);
+		// The wiki disambiguates a monster sharing its name with an item (Manta ray, Monkey, Penguin, Rock golem…)
+		// as "X (monster)", but the in-game NPC name is just "X". Fall back to that page when the plain name misses.
+		final List<DropEntry> snapshot = bundled.containsKey(key) ? bundled.get(key) : bundled.get(key + " (monster)");
 		if (snapshot != null)
 		{
 			return CompletableFuture.completedFuture(snapshot);
