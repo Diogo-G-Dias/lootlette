@@ -2,6 +2,13 @@
 
 All notable changes to Lootlette are documented here.
 
+## [1.0.10] - 2026-07-08
+
+### Data
+- Removed **Ancient essence** and **Frozen cache** from Phantom Muspah's tagged unique set. They sit under the
+  wiki's "Unique" header but are common drops, so the "cha-ching" was firing on nearly every Muspah kill; the
+  real uniques (Ancient icon, Venator shard) still trigger it.
+
 ## [1.0.7] - 2026-07-07
 
 ### Added

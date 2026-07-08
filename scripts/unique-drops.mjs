@@ -10,6 +10,10 @@ const API = "https://oldschool.runescape.wiki/api.php";
 const UA = "loulette RuneLite plugin (build scraper; github.com/diogogdias/loulette)";
 const BATCH = 50;
 
+// Common resources filed under Phantom Muspah's "Unique" header (Ancient essence, Frozen cache) that aren't
+// trophies — leaving them tagged makes the cha-ching fire on ordinary Muspah drops. Lower-cased, exact match.
+const BLOCKLIST = new Set(["ancient essence", "frozen cache"]);
+
 // Bosses with no ===Uniques=== section on their wiki page. Keyed by lower-cased page name.
 const MANUAL = {
   "vorkath": ["Skeletal visage", "Draconic visage", "Dragonbone necklace", "Jar of decay", "Vorki", "Vorkath's head"],
@@ -91,10 +95,11 @@ export async function scrapeUniques(titles, itemMap, log = () => {}) {
     uniques[page] = [...set];
   }
 
-  // Keep only names that resolve to an item id; warn on the rest so drift is visible at build time.
+  // Keep only names that resolve to an item id and aren't blocklisted non-trophy filler; warn on the rest
+  // so drift is visible at build time.
   let kept = 0, dropped = 0;
   for (const [page, names] of Object.entries(uniques)) {
-    const resolved = names.filter((n) => n.toLowerCase() in itemMap);
+    const resolved = names.filter((n) => n.toLowerCase() in itemMap && !BLOCKLIST.has(n.toLowerCase()));
     for (const n of names) {
       if (!(n.toLowerCase() in itemMap)) { log(`uniques: '${n}' (${page}) has no item id — skipped\n`); dropped++; }
     }
