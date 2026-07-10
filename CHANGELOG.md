@@ -2,6 +2,14 @@
 
 All notable changes to Lootlette are documented here.
 
+## [1.0.11] - 2026-07-10
+
+### Fixed
+- The Nightmare / Phosani's Nightmare no longer rolls a **second, duplicate slot** for the same kill. Its
+  ground loot pile spawns ~10 ticks after death, so the kill's loot arrived via two events on different
+  ticks and slipped past the same-tick dedupe; loot claims are now tracked per event source with a
+  cross-source window, while rapid repeat harvests (single-source) still roll every yield.
+
 ## [1.0.10] - 2026-07-08
 
 ### Data

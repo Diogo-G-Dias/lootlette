@@ -215,9 +215,14 @@ public class LoulettePlugin extends Plugin
 	private final Map<String, Set<Integer>> raidUniqueIds = new ConcurrentHashMap<>();
 	private final Map<Integer, Long> engagedUntil = new ConcurrentHashMap<>();
 	private final Set<Integer> handledDeaths = ConcurrentHashMap.newKeySet();
-	// Dedupe: monster name (lower) -> game tick it was last rolled, so a kill isn't rolled twice when
-	// both NpcLootReceived (ground) and ServerNpcLoot (server) fire for it.
-	private final Map<String, Integer> handledLootTick = new ConcurrentHashMap<>();
+	// Dedupe: monster name (lower) -> game tick its loot was last claimed, per event source. A kill's loot
+	// arrives via both NpcLootReceived (ground pile) and ServerNpcLoot (server event); usually on the same tick,
+	// but the Nightmare's ground pile spawns ~10 ticks after death (LootManager's delayedLootTick), so a claim
+	// from the OTHER source within a short window is the same kill and must not roll a second reel. Same-source
+	// claims only dedupe within one tick, so rapid repeat harvests (ServerNpcLoot-only) keep rolling.
+	private static final int CROSS_SOURCE_DEDUPE_TICKS = 15;
+	private final Map<String, Integer> handledGroundLootTick = new ConcurrentHashMap<>();
+	private final Map<String, Integer> handledServerLootTick = new ConcurrentHashMap<>();
 	private final Random random = new Random();
 
 	// CoX early switch: between Olm's head death and the chest loot, the "Valuable drop:" chat lines reveal the
@@ -248,7 +253,8 @@ public class LoulettePlugin extends Plugin
 		tableCache.clear();
 		engagedUntil.clear();
 		handledDeaths.clear();
-		handledLootTick.clear();
+		handledGroundLootTick.clear();
+		handledServerLootTick.clear();
 		log.debug("Loulette stopped");
 	}
 
@@ -573,7 +579,7 @@ public class LoulettePlugin extends Plugin
 		{
 			return;
 		}
-		if (!claimLoot(npc.getName()))
+		if (!claimLoot(npc.getName(), false))
 		{
 			return;
 		}
@@ -602,8 +608,9 @@ public class LoulettePlugin extends Plugin
 		{
 			return;
 		}
-		// Dedupe against NpcLootReceived, which also fires for combat kills on the same tick.
-		if (!claimLoot(name))
+		// Dedupe against NpcLootReceived, which also fires for combat kills (usually same tick, delayed for
+		// the Nightmare-style bosses whose ground pile spawns late).
+		if (!claimLoot(name, true))
 		{
 			return;
 		}
@@ -622,11 +629,24 @@ public class LoulettePlugin extends Plugin
 		rollFor(npc != null ? npc.getIndex() : -1, loc, name, new ArrayList<>(items), false);
 	}
 
-	/** Claims a loot event for a creature this tick; returns false if it was already claimed (duplicate event). */
-	private boolean claimLoot(String monster)
+	/**
+	 * Claims a loot event for a creature; returns false if it's a duplicate of an already-claimed one — the same
+	 * source firing again this tick, or the other source having fired within the cross-source window (the
+	 * Nightmare's ground pile lags the server event by ~10 ticks). A rejected claim is not recorded, so a
+	 * same-tick pair (ground+server) for kill A doesn't push the window forward and block kill B moments later.
+	 */
+	private boolean claimLoot(String monster, boolean serverSource)
 	{
 		final int tick = client.getTickCount();
-		final Integer prev = handledLootTick.put(monster.toLowerCase(), tick);
+		final String key = monster.toLowerCase();
+		final Map<String, Integer> same = serverSource ? handledServerLootTick : handledGroundLootTick;
+		final Map<String, Integer> other = serverSource ? handledGroundLootTick : handledServerLootTick;
+		final Integer otherPrev = other.get(key);
+		if (otherPrev != null && tick - otherPrev <= CROSS_SOURCE_DEDUPE_TICKS)
+		{
+			return false;
+		}
+		final Integer prev = same.put(key, tick);
 		return prev == null || prev != tick;
 	}
 
@@ -1522,6 +1542,10 @@ public class LoulettePlugin extends Plugin
 			activeRolls.clear();
 			engagedUntil.clear();
 			handledDeaths.clear();
+			// The tick counter isn't guaranteed monotonic across sessions; a stale claim tick from before a
+			// relog/hop could otherwise make the cross-source window reject a fresh kill's loot.
+			handledGroundLootTick.clear();
+			handledServerLootTick.clear();
 		}
 	}
 
