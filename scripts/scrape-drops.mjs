@@ -42,6 +42,14 @@ async function fetchPage(offset) {
   return json.bucket ?? [];
 }
 
+// The Gauntlet's loot is delivered by a shared reward chest, so the wiki keeps both difficulties' tables on a
+// single page the plugin never looks up (it looks tables up by the name of the NPC that was killed). Every drop
+// line names its section in `Dropped from`, so re-key those two sections onto the Hunllef that drops them.
+const SECTION_PAGES = {
+  "reward chest (the gauntlet)#regular": "Crystalline Hunllef",
+  "reward chest (the gauntlet)#corrupted": "Corrupted Hunllef",
+};
+
 const monsters = {};
 const titles = {}; // lower-cased page key -> original-case wiki title (for the wikitext scrape)
 let total = 0, kept = 0;
@@ -56,17 +64,21 @@ for (let offset = 0; ; offset += PAGE) {
     const name = (row.item_name || "").trim();
     if (!page || !name || name.toLowerCase() === "nothing") continue;
 
-    let rarity = "", rolls = 1;
+    let rarity = "", rolls = 1, section = "";
     if (row.drop_json) {
       try {
         const dj = JSON.parse(row.drop_json);
         rarity = (dj.Rarity ?? "").toString();
         const r = parseInt(dj.Rolls, 10);
         if (Number.isFinite(r) && r > 0) rolls = r;
+        section = (dj["Dropped from"] ?? "").toString().toLowerCase();
       } catch { /* keep defaults */ }
     }
 
-    const key = page.toLowerCase();
+    const alias = SECTION_PAGES[section];
+    const key = (alias ?? page).toLowerCase();
+    // Uniques are scraped from the wikitext of the page the rows actually live on, so an aliased key keeps
+    // pointing at the reward-chest page rather than the (drop-table-less) Hunllef page.
     titles[key] ??= page;
     (monsters[key] ??= []).push(rolls === 1 ? [name, rarity] : [name, rarity, rolls]);
     kept++;

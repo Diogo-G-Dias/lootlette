@@ -162,6 +162,19 @@ public class LoulettePlugin extends Plugin
 	private static final int[] TOA_VARBIT_CHEST_SEATS = {14356, 14357, 14358, 14359, 14360, 14370, 14371, 14372};
 	private static final int TOA_VARBIT_CHEST_KEY = 2;
 
+	// A "Nothing" kill fires no loot event at all — RuneLite only posts NpcLootReceived/ServerNpcLoot when the item
+	// list is non-empty — so an empty drop can only be inferred from the absence of one. Loot spawns on the tick the
+	// corpse despawns, so one spare tick after that is conclusive: no loot event by then means the kill dropped
+	// nothing, and the reel lands on "Nothing" instead of free-spinning to the timeout. (Nothing is a normal, common
+	// outcome: a TzHaar-Ket is 1,280/2,048 nothing, and still 931/1,536 with a ring of wealth equipped.)
+	private static final int NO_LOOT_GRACE_TICKS = 2;
+	// The three creatures whose loot RuneLite's LootManager deliberately holds back — the Nightmare by 10 ticks,
+	// Duke Sucellus by 5, the Swamp wallbeast by 1 — need to outlast their own delay before that inference is valid.
+	private static final int DELAYED_LOOT_GRACE_TICKS = 12;
+	private static final Set<String> DELAYED_LOOT_NPCS = new HashSet<>(Arrays.asList(
+		"the nightmare", "phosani's nightmare", "duke sucellus", "swamp wallbeast"
+	));
+
 	private static final int COINS_ITEM_ID = 995;
 	private static final long ENGAGE_MS = 6000;
 	// How long a reel free-spins waiting for its loot before giving up. Harvests can take 10s+ to yield, so the
@@ -215,6 +228,8 @@ public class LoulettePlugin extends Plugin
 	private final Map<String, Set<Integer>> raidUniqueIds = new ConcurrentHashMap<>();
 	private final Map<Integer, Long> engagedUntil = new ConcurrentHashMap<>();
 	private final Set<Integer> handledDeaths = ConcurrentHashMap.newKeySet();
+	// NPC index -> game tick by which its loot must have arrived, or the kill dropped nothing (see onNpcDespawned).
+	private final Map<Integer, Integer> lootDeadlineTick = new ConcurrentHashMap<>();
 	// Dedupe: monster name (lower) -> game tick its loot was last claimed, per event source. A kill's loot
 	// arrives via both NpcLootReceived (ground pile) and ServerNpcLoot (server event); usually on the same tick,
 	// but the Nightmare's ground pile spawns ~10 ticks after death (LootManager's delayedLootTick), so a claim
@@ -255,6 +270,7 @@ public class LoulettePlugin extends Plugin
 		handledDeaths.clear();
 		handledGroundLootTick.clear();
 		handledServerLootTick.clear();
+		lootDeadlineTick.clear();
 		log.debug("Loulette stopped");
 	}
 
@@ -363,6 +379,26 @@ public class LoulettePlugin extends Plugin
 		final int interactingIndex = me != null && me.getInteracting() instanceof NPC
 			? ((NPC) me.getInteracting()).getIndex()
 			: -1;
+
+		// A dead creature whose loot never showed up dropped nothing: land its reel on "Nothing" rather than let it
+		// free-spin to the timeout. Skipped while the player is still interacting with it (a harvest still yielding).
+		final int nowTick = client.getTickCount();
+		for (Map.Entry<Integer, Integer> deadline : lootDeadlineTick.entrySet())
+		{
+			if (nowTick < deadline.getValue() || deadline.getKey() == interactingIndex)
+			{
+				continue;
+			}
+			final ActiveRoll roll = findRoll(deadline.getKey());
+			lootDeadlineTick.remove(deadline.getKey());
+			if (roll != null)
+			{
+				log.debug("no loot event for '{}' -> land Nothing", roll.getMonster());
+				finaliseRoll(roll, Collections.emptyList(),
+					dropTableService.table(roll.getMonster()).getNow(Collections.emptyList()));
+			}
+		}
+
 		activeRolls.removeIf(roll ->
 		{
 			if (roll.done(now, config.resultHoldMs(), config.fadeMs()))
@@ -390,7 +426,18 @@ public class LoulettePlugin extends Plugin
 	@Subscribe
 	public void onNpcDespawned(NpcDespawned event)
 	{
-		handledDeaths.remove(event.getNpc().getIndex());
+		final int index = event.getNpc().getIndex();
+		handledDeaths.remove(index);
+		// The corpse is gone, so its loot (if any) spawned on this tick. Give the loot event a tick to reach us; if
+		// it hasn't by the deadline, the kill dropped nothing and the still-spinning reel lands on "Nothing".
+		final ActiveRoll roll = findRoll(index);
+		if (roll != null)
+		{
+			final int grace = DELAYED_LOOT_NPCS.contains(roll.getMonster().toLowerCase())
+				? DELAYED_LOOT_GRACE_TICKS
+				: NO_LOOT_GRACE_TICKS;
+			lootDeadlineTick.put(index, client.getTickCount() + grace);
+		}
 	}
 
 	/** When the ignore toggle is on, add a Lootlette-ignore / -unignore option to NPC right-click menus. */
@@ -1446,7 +1493,7 @@ public class LoulettePlugin extends Plugin
 		// Pets are rolled on a separate roll from the main table, so they're kept out of the main pool and
 		// roll-count here and land on their own dedicated reel in finaliseRoll (only when the pet actually drops).
 		final Set<String> petNames = new LinkedHashSet<>();
-		final Map<Integer, Integer> rollCounts = new HashMap<>();
+		final Set<Integer> rollGroups = new HashSet<>();
 		final Map<String, Double> nameChance = new HashMap<>();
 		for (DropEntry e : entries)
 		{
@@ -1464,7 +1511,7 @@ public class LoulettePlugin extends Plugin
 				// Skip shared rare/gem/mega drop-table rows; a name shared with a real drop keeps that row's
 				// chance/colour, and an item with only rare-table rows drops out of the reel pool entirely.
 				nonAlwaysNames.add(e.getName());
-				rollCounts.merge(e.getRolls(), 1, Integer::sum);
+				rollGroups.add(e.getRolls());
 				nameChance.merge(e.getName(), e.getChance(), LoulettePlugin::rarer);
 			}
 		}
@@ -1528,7 +1575,7 @@ public class LoulettePlugin extends Plugin
 		// A pet-only non-always table still spins (its pet reel), so it isn't "always only"; but with no main
 		// non-always names the main table rolls nothing.
 		final boolean alwaysOnly = nonAlwaysNames.isEmpty() && petIds.isEmpty();
-		final int mainRolls = nonAlwaysNames.isEmpty() ? 0 : mode(rollCounts);
+		final int mainRolls = nonAlwaysNames.isEmpty() ? 0 : totalRolls(rollGroups);
 		final ResolvedTable table = new ResolvedTable(pool, palette, idChance, alwaysIds, uniqueIds, petIds, mainRolls, alwaysOnly);
 		tableCache.put(monster.toLowerCase(), table);
 		return table;
@@ -1546,6 +1593,7 @@ public class LoulettePlugin extends Plugin
 			// relog/hop could otherwise make the cross-source window reject a fresh kill's loot.
 			handledGroundLootTick.clear();
 			handledServerLootTick.clear();
+			lootDeadlineTick.clear();
 		}
 	}
 
@@ -1593,19 +1641,21 @@ public class LoulettePlugin extends Plugin
 		return Math.min(a, b);
 	}
 
-	private static int mode(Map<Integer, Integer> counts)
+	/**
+	 * How many reels the main table spins. A wiki table is really several sub-tables, each rolled its own
+	 * number of times (a superior slayer monster rolls its 3 main rolls plus one independent roll for the
+	 * imbued heart/eternal gem; a Gauntlet chest rolls 3 supplies plus one for the seeds), so the total is the
+	 * sum of the distinct roll counts, not the most common one. Counting only the biggest sub-table made the
+	 * reel shrink to the drops actually received, which spoiled a unique before the reel finished spinning.
+	 */
+	private static int totalRolls(Set<Integer> rollGroups)
 	{
-		int best = 1;
-		int bestCount = 0;
-		for (Map.Entry<Integer, Integer> e : counts.entrySet())
+		int total = 0;
+		for (int rolls : rollGroups)
 		{
-			if (e.getValue() > bestCount || (e.getValue() == bestCount && e.getKey() < best))
-			{
-				best = e.getKey();
-				bestCount = e.getValue();
-			}
+			total += rolls;
 		}
-		return Math.max(1, best);
+		return Math.max(1, total);
 	}
 
 	private void padTo(List<Integer> symbols, int min)

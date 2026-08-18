@@ -2,6 +2,35 @@
 
 All notable changes to Lootlette are documented here.
 
+## [1.0.12] - 2026-08-18
+
+### Fixed
+- The **"cha-ching" no longer fires on ordinary coin drops** at the God Wars Dungeon. Every GWD minion's wiki
+  page lists its large Coins drop under the same "Unique" header as the god-item pieces, so Coins was bundled
+  into their tagged unique set; it's now blocklisted the way Phantom Muspah's Ancient essence already was.
+- A kill that drops **nothing** now lands the reel on "Nothing" instead of free-spinning until the timeout.
+  RuneLite posts no loot event at all for an empty drop, so it's inferred from the absence of one: a two-tick
+  deadline armed when the corpse despawns (twelve ticks for the Nightmare, Duke Sucellus and the Swamp
+  wallbeast, whose loot RuneLite deliberately delays). Affects any monster with a common "Nothing" row, such
+  as TzHaar-Ket. (#4)
+
+### Changed
+- The reel count no longer **spoils a unique before the reel stops**. A wiki drop table is really several
+  sub-tables, each rolled its own number of times, so a kill now spins the sum of those roll counts rather
+  than just the biggest one. The Corrupted Gauntlet spins four reels on every kill (three supplies plus one
+  independent unique roll that lands on "Nothing" when nothing drops); superior slayer monsters get the same
+  treatment for their imbued heart / eternal gem roll. 66 monsters gain one or two reels; the rest are
+  unchanged. (#5)
+
+### Data
+- **The Gauntlet and Corrupted Gauntlet now have real drop tables.** Their loot is credited to the Hunllef,
+  but the wiki keeps both difficulties' tables on the shared Reward Chest (The Gauntlet) page, which nothing
+  looked up — so the reel fell back to "drops seen this session" and armour seeds, enhanced seeds, Youngllef
+  and dragon halberds never appeared at all. The scraper now reads each drop line's section anchor and files
+  the Regular and Corrupted sections under Crystalline Hunllef and Corrupted Hunllef, with their uniques
+  tagged and Youngllef on the dedicated pet reel. (#5)
+- Refreshed the bundled drop snapshot: 2,090 -> 2,130 monsters, 3,487 -> 3,513 item ids.
+
 ## [1.0.11] - 2026-07-10
 
 ### Fixed

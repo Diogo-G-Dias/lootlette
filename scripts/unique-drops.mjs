@@ -10,9 +10,10 @@ const API = "https://oldschool.runescape.wiki/api.php";
 const UA = "loulette RuneLite plugin (build scraper; github.com/diogogdias/loulette)";
 const BATCH = 50;
 
-// Common resources filed under Phantom Muspah's "Unique" header (Ancient essence, Frozen cache) that aren't
-// trophies — leaving them tagged makes the cha-ching fire on ordinary Muspah drops. Lower-cased, exact match.
-const BLOCKLIST = new Set(["ancient essence", "frozen cache"]);
+// Bulk resources filed under a "Unique" header that aren't trophies: Ancient essence and Frozen cache sit
+// under Phantom Muspah's, and every God Wars minion page lists its big Coins drop alongside the god items.
+// Leaving them tagged makes the cha-ching fire on ordinary drops. Lower-cased, exact match.
+const BLOCKLIST = new Set(["ancient essence", "frozen cache", "coins"]);
 
 // Bosses with no ===Uniques=== section on their wiki page. Keyed by lower-cased page name.
 const MANUAL = {
@@ -24,6 +25,10 @@ const MANUAL = {
   "obor": ["Hill giant club"],
   "bryophyta": ["Bryophyta's essence"],
   "brutus": ["Mooleta", "Bottomless milk bucket (empty)", "Cow slippers"],
+  // The Hunllefs' rows are re-keyed off the shared Reward Chest (The Gauntlet) page (see scrape-drops.mjs),
+  // which has no ===Uniques=== section of its own.
+  "crystalline hunllef": ["Crystal weapon seed", "Crystal armour seed", "Enhanced crystal weapon seed", "Youngllef"],
+  "corrupted hunllef": ["Crystal weapon seed", "Crystal armour seed", "Enhanced crystal weapon seed", "Youngllef"],
 };
 
 const HEADER = /^\s*===+\s*(.*?)\s*===+\s*$/;
