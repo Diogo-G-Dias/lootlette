@@ -2,6 +2,13 @@
 
 All notable changes to Lootlette are documented here.
 
+## [1.0.13] - 2026-09-29
+
+### Fixed
+- **Builds against RuneLite 1.13.0 again.** The client changed `ItemManager.getItemPrice` to return a `long`,
+  which broke compilation, so the Plugin Hub marked Lootlette as incompatible. The min-value filter now
+  reads prices as `long`. (#6)
+
 ## [1.0.12] - 2026-08-18
 
 ### Fixed

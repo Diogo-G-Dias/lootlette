@@ -1167,7 +1167,7 @@ public class LoulettePlugin extends Plugin
 					continue;
 				}
 				// Min-value filter applies only to known (tradeable) prices; keep untradeables (price 0).
-				final int price = itemManager.getItemPrice(s.getId());
+				final long price = itemManager.getItemPrice(s.getId());
 				if (price > 0 && price < config.minItemValue())
 				{
 					continue;
@@ -1375,7 +1375,7 @@ public class LoulettePlugin extends Plugin
 			}
 			// The min-value filter only applies to items with a KNOWN (tradeable) price; untradeables return
 			// price 0, which is "unknown" not "worthless" — clue scrolls/boxes, pets, fragments must still land.
-			final int price = itemManager.getItemPrice(s.getId());
+			final long price = itemManager.getItemPrice(s.getId());
 			if (price > 0 && price < config.minItemValue())
 			{
 				continue;

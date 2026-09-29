@@ -28,7 +28,7 @@ dependencies {
 }
 
 group = 'com.github.diogogdias'
-version = '1.0.12'
+version = '1.0.13'
 
 tasks.withType(JavaCompile).configureEach {
 	options.encoding = 'UTF-8'
