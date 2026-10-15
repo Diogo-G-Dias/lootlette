@@ -9,6 +9,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Random;
 import java.util.Set;
@@ -219,6 +220,8 @@ public class LoulettePlugin extends Plugin
 
 	// NPC names (lower-cased) the player has chosen to never roll a reel for. Persisted in the ignoredNpcs config.
 	private final Set<String> ignoredNpcs = ConcurrentHashMap.newKeySet();
+	// Additional NPCs allowed alongside bosses, not a replacement for the boss list.
+	private final Set<String> whitelistedNpcs = ConcurrentHashMap.newKeySet();
 
 	private final List<ActiveRoll> activeRolls = new CopyOnWriteArrayList<>();
 	private final Map<String, Set<Integer>> seenDrops = new ConcurrentHashMap<>();
@@ -253,6 +256,7 @@ public class LoulettePlugin extends Plugin
 		overlayManager.add(chestOverlay);
 		overlayManager.add(reelOverlay);
 		loadIgnoredNpcs();
+		loadNpcNames(config.whitelistedNpcs(), whitelistedNpcs);
 		log.debug("Lootlette started");
 	}
 
@@ -293,24 +297,66 @@ public class LoulettePlugin extends Plugin
 		{
 			loadIgnoredNpcs();
 		}
+		if (CONFIG_GROUP.equals(event.getGroup()) && "whitelistedNpcs".equals(event.getKey()))
+		{
+			loadNpcNames(config.whitelistedNpcs(), whitelistedNpcs);
+		}
+		if (CONFIG_GROUP.equals(event.getGroup()) && ("bossOnly".equals(event.getKey())
+			|| "whitelistedNpcs".equals(event.getKey()) || "ignoredNpcs".equals(event.getKey())))
+		{
+			// Apply immediately to reels already spinning, while preserving the existing boss reward chests.
+			activeRolls.removeIf(roll -> !shouldRollNpc(roll.getMonster()) && !isBossRewardChest(roll.getMonster()));
+		}
 	}
 
 	private void loadIgnoredNpcs()
 	{
-		ignoredNpcs.clear();
-		for (String s : config.ignoredNpcs().split(","))
+		loadNpcNames(config.ignoredNpcs(), ignoredNpcs);
+	}
+
+	private static void loadNpcNames(String names, Set<String> target)
+	{
+		target.clear();
+		if (names == null)
 		{
-			final String name = s.trim().toLowerCase();
+			return;
+		}
+		for (String s : names.split(","))
+		{
+			final String name = normaliseNpcName(s);
 			if (!name.isEmpty())
 			{
-				ignoredNpcs.add(name);
+				target.add(name);
 			}
 		}
 	}
 
+	private static String normaliseNpcName(String name)
+	{
+		return Text.removeTags(name).replace('\u00a0', ' ').trim().toLowerCase(Locale.ROOT);
+	}
+
 	private boolean isIgnored(String name)
 	{
-		return name != null && ignoredNpcs.contains(name.toLowerCase());
+		return name != null && ignoredNpcs.contains(normaliseNpcName(name));
+	}
+
+	private boolean shouldRollNpc(String name)
+	{
+		return !isIgnored(name) && (!config.bossOnly() || BossSources.isBoss(name)
+			|| (name != null && whitelistedNpcs.contains(normaliseNpcName(name))));
+	}
+
+	private static boolean isBossRewardChest(String name)
+	{
+		for (RaidChest raid : RAID_CHESTS)
+		{
+			if (raid.page.equalsIgnoreCase(name))
+			{
+				return true;
+			}
+		}
+		return false;
 	}
 
 	/** Toggle an NPC name on the ignore list, persist it, and drop any reel currently rolling for it. */
@@ -318,12 +364,12 @@ public class LoulettePlugin extends Plugin
 	{
 		if (ignore)
 		{
-			ignoredNpcs.add(name.toLowerCase());
+			ignoredNpcs.add(normaliseNpcName(name));
 			activeRolls.removeIf(r -> name.equalsIgnoreCase(r.getMonster()));
 		}
 		else
 		{
-			ignoredNpcs.remove(name.toLowerCase());
+			ignoredNpcs.remove(normaliseNpcName(name));
 		}
 		configManager.setConfiguration(CONFIG_GROUP, "ignoredNpcs", String.join(",", ignoredNpcs));
 		log.debug("{} '{}' (ignore list now {})", ignore ? "ignored" : "unignored", name, ignoredNpcs);
@@ -342,7 +388,7 @@ public class LoulettePlugin extends Plugin
 			engagedUntil.put(target.getIndex(), now + ENGAGE_MS);
 			// Warm the table while fighting so it's ready by the time it dies (instant for the bundled
 			// snapshot; triggers the live fetch only when the fallback is enabled and the monster is unbundled).
-			if (target.getName() != null)
+			if (target.getName() != null && shouldRollNpc(target.getName()))
 			{
 				dropTableService.table(target.getName());
 			}
@@ -478,7 +524,8 @@ public class LoulettePlugin extends Plugin
 	{
 		final MenuEntry entry = event.getMenuEntry();
 		final NPC npc = entry.getNpc();
-		if (npc == null || npc.getName() == null || tableCache.containsKey(npc.getName().toLowerCase()))
+		if (npc == null || npc.getName() == null || !shouldRollNpc(npc.getName())
+			|| tableCache.containsKey(npc.getName().toLowerCase()))
 		{
 			return;
 		}
@@ -491,9 +538,9 @@ public class LoulettePlugin extends Plugin
 	private void startSpin(NPC npc, long now)
 	{
 		final String monster = npc.getName();
-		if (isIgnored(monster))
+		if (!shouldRollNpc(monster))
 		{
-			log.debug("skip spin '{}' (ignored)", monster);
+			log.debug("skip spin '{}' (filtered)", monster);
 			return;
 		}
 		// Chambers of Xeric: the Great Olm head dying is the kill. Start a persistent full-table reel here that
@@ -617,7 +664,7 @@ public class LoulettePlugin extends Plugin
 	public void onNpcLootReceived(NpcLootReceived event)
 	{
 		final NPC npc = event.getNpc();
-		if (npc == null || npc.getName() == null || isRaidChestBoss(npc.getName()) || isIgnored(npc.getName()))
+		if (npc == null || npc.getName() == null || isRaidChestBoss(npc.getName()) || !shouldRollNpc(npc.getName()))
 		{
 			return;
 		}
@@ -651,7 +698,7 @@ public class LoulettePlugin extends Plugin
 		final Collection<ItemStack> items = event.getItems();
 		log.debug("onServerNpcLoot '{}' id={} items={}", name, comp.getId(), items == null ? -1 : items.size());
 		if (name.isEmpty() || "null".equals(name) || items == null || items.isEmpty()
-			|| isRaidChestBoss(name) || isIgnored(name))
+			|| isRaidChestBoss(name) || !shouldRollNpc(name))
 		{
 			return;
 		}
@@ -1340,6 +1387,11 @@ public class LoulettePlugin extends Plugin
 
 	private void finaliseRoll(ActiveRoll roll, List<ItemStack> items, List<DropEntry> entries)
 	{
+		// A live wiki lookup may finish after the user enabled the boss filter and removed this reel.
+		if (!shouldRollNpc(roll.getMonster()) && !isBossRewardChest(roll.getMonster()))
+		{
+			return;
+		}
 		final ResolvedTable table = !entries.isEmpty()
 			? resolveTable(roll.getMonster(), entries)
 			: tableCache.get(roll.getMonster().toLowerCase());

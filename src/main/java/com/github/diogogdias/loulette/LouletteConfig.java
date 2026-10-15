@@ -102,6 +102,30 @@ public interface LouletteConfig extends Config
 		return "Scavenger beast";
 	}
 
+	@ConfigItem(
+		keyName = "bossOnly",
+		name = "Bosses only",
+		description = "Only spin for bosses and supported raid/boss reward chests. Ordinary monsters, boss minions "
+			+ "and Sailing harvests are excluded unless whitelisted; the NPC ignore list still applies.",
+		position = 6
+	)
+	default boolean bossOnly()
+	{
+		return false;
+	}
+
+	@ConfigItem(
+		keyName = "whitelistedNpcs",
+		name = "NPC whitelist",
+		description = "Comma-separated exact NPC names to include alongside bosses when Bosses only is enabled. "
+			+ "For example: Sergeant Strongstack, Sergeant Steelwill, Sergeant Grimspike. Case is ignored; ignored NPCs still take precedence.",
+		position = 7
+	)
+	default String whitelistedNpcs()
+	{
+		return "";
+	}
+
 	// ---- Advanced ----
 
 	@Range(min = 4, max = 40)

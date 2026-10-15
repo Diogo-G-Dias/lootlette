@@ -59,9 +59,26 @@ counts, always-drop filtering, rarity colours or Nothing results).
 | Result hold time (ms) | 2500 | How long the landed result stays on screen before it fades. |
 | Slot size (%) | 100 | Scales the reel slots and the item icons (50–250%). |
 | Horizontal reel (top centre) | off | Single CS:GO-style strip at the top centre instead of reels over the tile. |
+| Bosses only | off | Only spin for bosses, whitelisted NPCs and the raid/boss reward chests already supported by Lootlette. Skips other ordinary monsters, boss minions and Sailing harvests; ignored NPCs stay ignored. Enabling it also removes reels that no longer qualify. |
+| NPC whitelist | empty | Comma-separated exact NPC names to include alongside bosses in boss-only mode. Case and surrounding spaces are ignored. The ignore list takes precedence. |
 | Min item value (gp) | 0 | Drops below this value roll to 'Nothing'. 0 = count everything. |
 | Hide rare drop table | on | Leaves the shared rare/gem/mega drop table (uncut gems, half keys, deep rune/dragon drops) out of the reel so a monster's own drops and uniques stand out. Items you actually receive still land. |
 | Live wiki fallback | off | Fetch tables live from the wiki for monsters missing from the bundled snapshot. Off by default because it sends your IP to a third-party server. |
+
+Boss detection uses RuneLite's hiscore boss names, with NPC-name mappings for Grotesque Guardians,
+Royal Titans, the Gauntlet, Vet'ion's second form and Great Olm. The toggle filters existing loot
+sources; it does not add support for new reward-chest types. NPCs absent from the boss list can be
+included explicitly through the whitelist.
+
+For example, to include Bandos's three minions with **Bosses only** enabled, set **NPC whitelist** to:
+
+```text
+Sergeant Strongstack, Sergeant Steelwill, Sergeant Grimspike
+```
+
+This adds exceptions rather than limiting the plugin to those names: all recognised bosses still roll.
+With **Bosses only** off, ordinary NPCs still roll as usual. Editing the whitelist applies immediately
+to existing reels and pending table lookups; ignored NPCs never bypass the ignore list through the whitelist.
 
 ### Rarity colours
 
